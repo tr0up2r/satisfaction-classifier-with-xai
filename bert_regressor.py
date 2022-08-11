@@ -27,6 +27,7 @@ data = []
 for content, body, satisfaction in zip(post_contents, comment_bodies, satisfactions):
     if content != '[deleted]' and content != '[removed]' and body != '[deleted]' and body != '[removed]':
         data.append([content + ' ' + body, satisfaction])
+        # data.append([content + '[SEP]' + body, satisfaction])
 
 df = pd.DataFrame(data, columns=['contents', 'label'])
 
@@ -63,6 +64,8 @@ encoded_data_test = tokenizer.batch_encode_plus(
     return_tensors='pt'
 )
 
+# BertTokenizer.build_inputs_with_special_tokens()
+
 input_ids_train = encoded_data_train['input_ids']
 attention_masks_train = encoded_data_train['attention_mask']
 labels_train = torch.tensor(labels_train, dtype=torch.float32)
@@ -74,8 +77,8 @@ labels_test = torch.tensor(labels_test, dtype=torch.float32)
 dataset_train = TensorDataset(input_ids_train, attention_masks_train, labels_train)
 dataset_test = TensorDataset(input_ids_test, attention_masks_test, labels_test)
 
-# batch_size = 3
-batch_size = 32
+batch_size = 3
+# batch_size = 32
 
 dataloader_train = DataLoader(dataset_train,
                               sampler=RandomSampler(dataset_train),
@@ -98,8 +101,6 @@ else:
     device = torch.device("cpu")
 
 model.to(device)
-
-batch_size = 32
 
 optimizer = AdamW(model.parameters(),
                   lr=2e-5,  # learning rate.
@@ -202,13 +203,13 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'R^2 score: {r2_score(true_vals, predict)}')
 
     pred_df = pd.DataFrame(predictions)
-    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/epoch_{epoch}_predicted_vals.csv')
+    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/epoch_{epoch}_predicted_vals.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
-with open('../predicting-satisfaction-using-graphs/csv/training_result.csv', 'w', newline='') as f:
+with open(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
