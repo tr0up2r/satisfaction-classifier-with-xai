@@ -103,10 +103,10 @@ else:
 model.to(device)
 
 optimizer = AdamW(model.parameters(),
-                  lr=2e-5,  # learning rate.
+                  lr=1e-5,  # learning rate.
                   eps=1e-8)  # learning rate가 0으로 나눠지는 것을 방지하기 위한 epsilon 값.
 
-epochs = 200
+epochs = 2
 
 # learning rate decay를 위한 scheduler. (linear 이용)
 # lr이 0부터 optimizer에서 설정한 lr까지 linear하게 warmup 됐다가 다시 0으로 linear 하게 감소.
@@ -121,7 +121,23 @@ def evaluate(dataloader_val):
     model.eval()
     loss_val_total = 0
 
-    predictions, true_vals = [], []
+    pooled_outputs, predictions, true_vals = [], [], []
+
+    for batch in dataloader_val:
+        batch = tuple(b.to(device) for b in batch)
+
+        inputs = {'input_ids': batch[0],
+                  'attention_mask': batch[1]
+                  }
+
+        with torch.no_grad():
+            outputs = model.bert(**inputs)
+
+        pooled_output = outputs[1]
+        pooled_output = model.dropout(pooled_output)
+
+        for output in pooled_output:
+            pooled_outputs.append(output.detach().tolist())
 
     for batch in dataloader_val:
         batch = tuple(b.to(device) for b in batch)
@@ -148,7 +164,9 @@ def evaluate(dataloader_val):
     predictions = np.concatenate(predictions, axis=0)
     true_vals = np.concatenate(true_vals, axis=0)
 
-    return loss_val_avg, predictions, true_vals
+    # print(pooled_outputs)
+
+    return loss_val_avg, predictions, true_vals, pooled_outputs
 
 
 training_result = []
@@ -192,7 +210,8 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'\nEpoch {epoch}')
     loss_train_avg = loss_train_total / len(dataloader_train)
     tqdm.write(f'Training loss: {loss_train_avg}')
-    val_loss, predictions, true_vals = evaluate(dataloader_test)
+    val_loss, predictions, true_vals, pooled_outputs = evaluate(dataloader_test)
+    print(pooled_outputs)
     evaluation_result.append([val_loss, predictions, torch.tensor(true_vals)])
     tqdm.write(f'Validation loss: {val_loss}')
 
@@ -203,19 +222,25 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'R^2 score: {r2_score(true_vals, predict)}')
 
     pred_df = pd.DataFrame(predictions)
-    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/epoch_{epoch}_predicted_vals.csv')
+    # pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/epoch_{epoch}_predicted_vals.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
+
+'''
+
 with open(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
     write.writerow(fields)
     write.writerows(training_result)
-
+'''
 
 true_df = pd.DataFrame(true_vals)
 true_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/true_vals.csv')
+
+pooled_df = pd.DataFrame(pooled_outputs)
+pooled_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/pooled_outputs.csv')
