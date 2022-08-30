@@ -26,8 +26,8 @@ data = []
 
 for content, body, satisfaction in zip(post_contents, comment_bodies, satisfactions):
     if content != '[deleted]' and content != '[removed]' and body != '[deleted]' and body != '[removed]':
-        data.append([content + ' ' + body, satisfaction])
-        # data.append([content + '[SEP]' + body, satisfaction])
+        # data.append([content + ' ' + body, satisfaction])
+        data.append([content + '[SEP]' + body, satisfaction])
 
 df = pd.DataFrame(data, columns=['contents', 'label'])
 
@@ -106,7 +106,7 @@ optimizer = AdamW(model.parameters(),
                   lr=1e-5,  # learning rate.
                   eps=1e-8)  # learning rate가 0으로 나눠지는 것을 방지하기 위한 epsilon 값.
 
-epochs = 2
+epochs = 200
 
 # learning rate decay를 위한 scheduler. (linear 이용)
 # lr이 0부터 optimizer에서 설정한 lr까지 linear하게 warmup 됐다가 다시 0으로 linear 하게 감소.
@@ -222,25 +222,22 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'R^2 score: {r2_score(true_vals, predict)}')
 
     pred_df = pd.DataFrame(predictions)
-    # pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/epoch_{epoch}_predicted_vals.csv')
+    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/bert/sep/batch_{batch_size}_lr_1e-5/epoch_{epoch}_predicted_vals.csv')
+
+    pooled_df = pd.DataFrame(pooled_outputs)
+    pooled_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/bert/sep/batch_{batch_size}_lr_1e-5/pooled_outputs/epoch_{epoch}_pooled_outputs.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
 
-'''
-
-with open(f'../predicting-satisfaction-using-graphs/csv/whitespace/batch_{batch_size}_lr_2e-5/training_result.csv', 'w', newline='') as f:
+with open(f'../predicting-satisfaction-using-graphs/csv/bert/sep/batch_{batch_size}_lr_1e-5/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
     write.writerow(fields)
     write.writerows(training_result)
-'''
 
 true_df = pd.DataFrame(true_vals)
 true_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/true_vals.csv')
-
-pooled_df = pd.DataFrame(pooled_outputs)
-pooled_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/pooled_outputs.csv')
