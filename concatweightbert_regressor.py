@@ -114,12 +114,11 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
-        self.weight = nn.Parameter(Variable(torch.FloatTensor(768, 1), requires_grad=True).cuda())
+        self.weight = nn.Parameter(Variable(torch.zeros(768), requires_grad=True).cuda())
         self.bert_post = BertModel(config)
         self.bert_comment = BertModel(config)
         self.classifier = nn.Linear(config.hidden_size*2, 768)
-        self.classifier2 = nn.Linear(config.hidden_size*768, 768)
-        self.classifier3 = nn.Linear(config.hidden_size*2, 1)
+        self.classifier2 = nn.Linear(config.hidden_size*2, 1)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -175,15 +174,11 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
 
         for p_pooled, c_pooled in zip(post_pooled_output, comment_pooled_output):
             inner = p_pooled * c_pooled * self.weight
-            inner = torch.flatten(inner)
-            inner = self.classifier2(inner)
             inner_list.append(inner)
 
         inner = torch.stack(inner_list)
 
-        output = self.classifier3(torch.cat((concat_result, inner), dim=1))
-        print(output)
-
+        output = self.classifier2(torch.cat((concat_result, inner), dim=1))
         loss = None
         self.config.problem_type = "regression"
         loss_fct = MSELoss()
