@@ -84,11 +84,6 @@ for content, body, satisfaction in zip(post_contents, comment_bodies, satisfacti
         for i in range(p_sentence_count):
             p_sentences[i] = str(p_sentences[i])
 
-        c_sentence_count = len(list(nlp(body).sents))
-        c_sentences = list(nlp(body).sents)
-        for i in range(c_sentence_count):
-            c_sentences[i] = str(c_sentences[i])
-
         if p_sentence_count >= 3:
             content = []
             for i in range(k):
@@ -97,21 +92,17 @@ for content, body, satisfaction in zip(post_contents, comment_bodies, satisfacti
                 else:
                     content.append(' '.join(p_sentences[round(i*(p_sentence_count / k)):round((i+1)*(p_sentence_count / k))]))
             for i in range(len(content)):
-                post_data.append([content[i], satisfaction, i+1, len(list(nlp(content[i]).sents))])
-        else:
-            post_data.append([content, satisfaction, 0, len(p_sentences)])
+                post_data.append([content[i], satisfaction, i, len(list(nlp(content[i]).sents))])
+        elif p_sentence_count == 2:
+            post_data.append([p_sentences[0], satisfaction, 0, 1])
+            post_data.append([p_sentences[1], satisfaction, 1, 1])
+            post_data.append(['', satisfaction, 2, 0])
+        else:  # p_sentence_count == 1
+            post_data.append([p_sentences[0], satisfaction, 0, 1])
+            post_data.append(['', satisfaction, 1, 0])
+            post_data.append(['', satisfaction, 2, 0])
 
-        if c_sentence_count >= 3:
-            body = []
-            for i in range(k):
-                if i == k - 1:
-                    body.append(' '.join(c_sentences[round(i*(c_sentence_count / k)):]))
-                else:
-                    body.append(' '.join(c_sentences[round(i*(c_sentence_count / k)):round((i+1)*(c_sentence_count / k))]))
-            for i in range(len(body)):
-                comment_data.append([body[i], satisfaction, i+1, len(body[i])])
-        else:
-            comment_data.append([body, satisfaction, 0, len(c_sentences)])
+        comment_data.append([body, satisfaction, 0, len(list(nlp(body).sents))])
 
 
 def make_df(data_list, index):
@@ -122,11 +113,15 @@ def make_df(data_list, index):
 
     return pd.DataFrame(new_list, columns=['contents', 'label', 'group', 'sentence_count'])
 
+
 p_dfs = []
-c_dfs = []
-for i in range(4):
+for i in range(k):
     p_dfs.append(make_df(post_data, i))
-    c_dfs.append(make_df(comment_data, i))
+
+for p_df in p_dfs:
+    print(p_df)
+
+c_df = pd.DataFrame(comment_data, columns=['contents', 'label', 'group', 'sentence_count'])
 
 
 test_size = 0.2
@@ -150,9 +145,10 @@ def split_df(df):
 for_dl_p = []
 for_dl_c = []
 
-for p_df, c_df in zip(p_dfs, c_dfs):
+for p_df in p_dfs:
     for_dl_p.append(split_df(p_df))
-    for_dl_c.append(split_df(c_df))
+
+for_dl_c.append(split_df(c_df))
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
 
@@ -194,15 +190,18 @@ def generate_dataloader(df, labels_train, labels_test, batch_size):
 
 
 batch_size = 3
-pc_loader_pairs_train = []
-pc_loader_pairs_test = []
+pc_loader_train = []
+pc_loader_test = []
 
-for p, c in zip(for_dl_p, for_dl_c):
-    print(len(p))
+comment_dataloader_train, comment_dataloader_test = generate_dataloader(for_dl_c[0][0], for_dl_c[0][1], for_dl_c[0][2], batch_size)
+
+for p in for_dl_p:
     post_dataloader_train, post_dataloader_test = generate_dataloader(p[0], p[1], p[2], batch_size)
-    comment_dataloader_train, comment_dataloader_test = generate_dataloader(c[0], c[1], c[2], batch_size)
-    pc_loader_pairs_train.append([post_dataloader_train, comment_dataloader_train])
-    pc_loader_pairs_test.append([post_dataloader_test, comment_dataloader_test])
+    pc_loader_train.append(post_dataloader_train)
+    pc_loader_test.append(post_dataloader_test)
+
+pc_loader_train.append(comment_dataloader_train)
+pc_loader_test.append(comment_dataloader_test)
 
 print('ok?')
 
@@ -212,9 +211,11 @@ class MatchingBertForSequenceClassification(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
-        self.bert = BertModel(config)
+        self.post_bert = BertModel(config)
+        self.comment_bert = BertModel(config)
         self.classifier = nn.Linear(config.hidden_size*3, 1)
         self.classifier2 = nn.Linear(2, 1)
+        self.multihead_attn = nn.MultiheadAttention(768, 8, device=torch.device("cuda"))
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -224,9 +225,11 @@ class MatchingBertForSequenceClassification(BertPreTrainedModel):
         post_input_ids1: Optional[torch.Tensor] = None,
         post_input_ids2: Optional[torch.Tensor] = None,
         post_input_ids3: Optional[torch.Tensor] = None,
+        comment_input_ids: Optional[torch.Tensor] = None,
         post_attention_mask1: Optional[torch.Tensor] = None,
         post_attention_mask2: Optional[torch.Tensor] = None,
         post_attention_mask3: Optional[torch.Tensor] = None,
+        comment_attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
@@ -239,12 +242,15 @@ class MatchingBertForSequenceClassification(BertPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        output_list = []
+        # print(len(post_input_ids3[0]))
+
+        post_output_list = []
         ids_list = [post_input_ids1, post_input_ids2, post_input_ids3]
         attention_list = [post_attention_mask1, post_attention_mask2, post_attention_mask3]
 
         for id, attention in zip(ids_list, attention_list):
-            post_outputs = self.bert(
+            # print(id)
+            post_outputs = self.post_bert(
                 id,
                 attention_mask=attention,
                 token_type_ids=token_type_ids,
@@ -255,10 +261,32 @@ class MatchingBertForSequenceClassification(BertPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-            output_list.append(post_outputs[1])
+            # print(len(post_outputs[1]))
+            post_output_list.append(post_outputs[1])
 
-        logits = self.classifier(torch.cat((output_list[0], output_list[1], output_list[2]), dim=1))  # should be b * (768*2) -> b * 1
+        comment_outputs = self.comment_bert(
+            comment_input_ids,
+            attention_mask=comment_attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        comment_output = comment_outputs[1]
 
+        attention_outputs = []
+        for post_output in post_output_list:
+            attn_output, attn_output_weights = self.multihead_attn(post_output, comment_output, comment_output)
+            attention_outputs.append(attn_output)
+
+        # print(len(attn_output[0]))
+
+        # print(attention_outputs[0].size())
+
+        logits = self.classifier(torch.cat((attention_outputs[0], attention_outputs[1], attention_outputs[2]), dim=1))  # should be b * (768*3) -> b * 1
         loss = None
         self.config.problem_type = "regression"
         loss_fct = MSELoss()
@@ -301,48 +329,28 @@ scheduler = get_linear_schedule_with_warmup(optimizer,
 
 # loss_function = nn.MSELoss()
 
-for p_batch1, p_batch2, p_batch3 in zip(pc_loader_pairs_train[1][0], pc_loader_pairs_train[2][0], pc_loader_pairs_train[3][0]):
-    p_batch1 = tuple(b.to(device) for b in p_batch1)
-    p_batch2 = tuple(b.to(device) for b in p_batch2)
-    p_batch3 = tuple(b.to(device) for b in p_batch3)
-
-    inputs = {'post_input_ids1': p_batch1[0],
-              'post_input_ids2': p_batch2[0],
-              'post_input_ids3': p_batch3[0],
-              'post_attention_mask1': p_batch1[1],
-              'post_attention_mask2': p_batch2[1],
-              'post_attention_mask3': p_batch3[1],
-              'labels': p_batch1[2]  # same in both batches.
-              }
-
-    outputs = model(**inputs)
-    loss = outputs[0]
-    print(outputs[1])
-
-    '''
-    print(f'i : {i}, loss : {loss}')
-    loss_train_total += loss.item()
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    optimizer.step()
-    scheduler.step()
-    i += 1
-    
-def evaluate(post_dataloader_val, comment_dataloader_val):
+def evaluate(pc_loader_test):
     model.eval()
     loss_val_total = 0
 
     predictions, true_vals = [], []
 
-    for p_batch, c_batch in zip(post_dataloader_val, comment_dataloader_val):
-        p_batch = tuple(b.to(device) for b in p_batch)
+    for p_batch1, p_batch2, p_batch3, c_batch in zip(pc_loader_test[0], pc_loader_test[1], pc_loader_test[2],
+                                                     pc_loader_test[3]):
+        p_batch1 = tuple(b.to(device) for b in p_batch1)
+        p_batch2 = tuple(b.to(device) for b in p_batch2)
+        p_batch3 = tuple(b.to(device) for b in p_batch3)
         c_batch = tuple(b.to(device) for b in c_batch)
 
-        inputs = {'post_input_ids': p_batch[0],
+        inputs = {'post_input_ids1': p_batch1[0],
+                  'post_input_ids2': p_batch2[0],
+                  'post_input_ids3': p_batch3[0],
                   'comment_input_ids': c_batch[0],
-                  'post_attention_mask': p_batch[1],
+                  'post_attention_mask1': p_batch1[1],
+                  'post_attention_mask2': p_batch2[1],
+                  'post_attention_mask3': p_batch3[1],
                   'comment_attention_mask': c_batch[1],
-                  'labels': p_batch[2]  # same in both batches.
+                  'labels': p_batch1[2]  # same in all batches.
                   }
 
 
@@ -358,7 +366,7 @@ def evaluate(post_dataloader_val, comment_dataloader_val):
         predictions.append(logits)
         true_vals.append(label_ids)
 
-    loss_val_avg = loss_val_total / len(post_dataloader_val)
+    loss_val_avg = loss_val_total / len(pc_loader_test[0])
 
     predictions = np.concatenate(predictions, axis=0)
     true_vals = np.concatenate(true_vals, axis=0)
@@ -379,19 +387,27 @@ for epoch in tqdm(range(1, epochs + 1)):
 
     i = 0
 
-    for p_batch, c_batch in zip(post_dataloader_train, comment_dataloader_train):
-        model.zero_grad()
-        p_batch = tuple(b.to(device) for b in p_batch)
+    for p_batch1, p_batch2, p_batch3, c_batch in zip(pc_loader_train[0], pc_loader_train[1], pc_loader_train[2],
+                                                     pc_loader_train[3]):
+        p_batch1 = tuple(b.to(device) for b in p_batch1)
+        p_batch2 = tuple(b.to(device) for b in p_batch2)
+        p_batch3 = tuple(b.to(device) for b in p_batch3)
         c_batch = tuple(b.to(device) for b in c_batch)
 
-        inputs = {'post_input_ids': p_batch[0],
+        inputs = {'post_input_ids1': p_batch1[0],
+                  'post_input_ids2': p_batch2[0],
+                  'post_input_ids3': p_batch3[0],
                   'comment_input_ids': c_batch[0],
-                  'post_attention_mask': p_batch[1],
+                  'post_attention_mask1': p_batch1[1],
+                  'post_attention_mask2': p_batch2[1],
+                  'post_attention_mask3': p_batch3[1],
                   'comment_attention_mask': c_batch[1],
-                  'labels': p_batch[2]  # same in both batches.
+                  'labels': p_batch1[2]  # same in all batches.
                   }
 
         outputs = model(**inputs)
+        print(outputs[1])
+
         loss = outputs[0]
         print(f'i : {i}, loss : {loss}')
         loss_train_total += loss.item()
@@ -405,7 +421,7 @@ for epoch in tqdm(range(1, epochs + 1)):
     print(f'\nEpoch {epoch}')
     loss_train_avg = loss_train_total / len(post_dataloader_train)
     print(f'Training loss: {loss_train_avg}')
-    val_loss, predictions, true_vals = evaluate(post_dataloader_test, comment_dataloader_test)
+    val_loss, predictions, true_vals = evaluate(pc_loader_test)
     evaluation_result.append([val_loss, predictions, torch.tensor(true_vals)])
     print(f'Validation loss: {val_loss}')
 
@@ -414,14 +430,14 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'R^2 score: {r2_score(true_vals, predict)}')
 
     pred_df = pd.DataFrame(predictions)
-    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/concatbert/batch_{batch_size}_lr_1e-5/epoch_{epoch}_predicted_vals.csv')
+    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/matchingbert/batch_{batch_size}_lr_1e-5/epoch_{epoch}_predicted_vals.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
 
-with open(f'../predicting-satisfaction-using-graphs/csv/concatbert/batch_{batch_size}_lr_1e-5/training_result.csv', 'w', newline='') as f:
+with open(f'../predicting-satisfaction-using-graphs/csv/matchingbert/batch_{batch_size}_lr_1e-5/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
@@ -430,4 +446,3 @@ with open(f'../predicting-satisfaction-using-graphs/csv/concatbert/batch_{batch_
 
 true_df = pd.DataFrame(true_vals)
 true_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/true_vals.csv')
-'''
