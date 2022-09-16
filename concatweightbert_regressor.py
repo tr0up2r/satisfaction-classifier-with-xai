@@ -64,6 +64,13 @@ def split_df(df):
 post_df, post_inputs_train, post_input_test, post_labels_train, post_labels_test = split_df(post_df)
 comment_df, comment_inputs_train, comment_input_test, comment_labels_train, comment_labels_test = split_df(comment_df)
 
+post_df[post_df['data_type'] == 'test'].to_csv(f'../predicting-satisfaction-using-graphs/test_posts.csv')
+comment_df[comment_df['data_type'] == 'test'].to_csv(f'../predicting-satisfaction-using-graphs/test_comments.csv')
+
+print('ok!')
+
+
+
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
 
 
@@ -114,7 +121,7 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
-        self.weight = nn.Parameter(Variable(torch.zeros(768), requires_grad=True).cuda())
+        self.weight = nn.Parameter(Variable(torch.ones(768), requires_grad=True).cuda())
         self.bert_post = BertModel(config)
         self.bert_comment = BertModel(config)
         self.classifier = nn.Linear(config.hidden_size*2, 768)
