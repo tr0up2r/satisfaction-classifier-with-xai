@@ -64,13 +64,6 @@ def split_df(df):
 post_df, post_inputs_train, post_input_test, post_labels_train, post_labels_test = split_df(post_df)
 comment_df, comment_inputs_train, comment_input_test, comment_labels_train, comment_labels_test = split_df(comment_df)
 
-post_df[post_df['data_type'] == 'test'].to_csv(f'../predicting-satisfaction-using-graphs/test_posts.csv')
-comment_df[comment_df['data_type'] == 'test'].to_csv(f'../predicting-satisfaction-using-graphs/test_comments.csv')
-
-print('ok!')
-
-
-
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
 
 
@@ -121,11 +114,14 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
-        self.weight = nn.Parameter(Variable(torch.ones(768), requires_grad=True).cuda())
+        self.weight = nn.Parameter(Variable(torch.zeros(768), requires_grad=True).cuda())
         self.bert_post = BertModel(config)
         self.bert_comment = BertModel(config)
         self.classifier = nn.Linear(config.hidden_size*2, 768)
-        self.classifier2 = nn.Linear(config.hidden_size*2, 1)
+        self.classifier2 = nn.Linear(config.hidden_size*2, 768)
+        self.classifier3 = nn.Linear(config.hidden_size, 1)
+        self.dropout = nn.Dropout(p=0.1)
+        self.relu = nn.ReLU()
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -175,7 +171,9 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         comment_pooled_output = comment_outputs[1]
 
         concat_result = self.classifier(torch.cat((post_pooled_output, comment_pooled_output), dim=1))  # should be b * (768*2) -> b * 768
-
+        # activation function -> dropout
+        concat_result = self.relu(concat_result)
+        concat_result = self.dropout(concat_result)
         # dot product
         inner_list = []
 
@@ -185,7 +183,12 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
 
         inner = torch.stack(inner_list)
 
-        output = self.classifier2(torch.cat((concat_result, inner), dim=1))
+        weight_result = self.classifier2(torch.cat((concat_result, inner), dim=1))
+        weight_result = self.relu(weight_result)
+        weight_result = self.dropout(weight_result)
+
+        output = self.classifier3(weight_result)
+
         loss = None
         self.config.problem_type = "regression"
         loss_fct = MSELoss()
