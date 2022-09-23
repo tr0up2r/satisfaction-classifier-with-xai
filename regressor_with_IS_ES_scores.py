@@ -18,6 +18,10 @@ comment_IS = list(data_df['comment_IS'])
 comment_ES = list(data_df['comment_ES'])
 satisfaction = list(data_df['satisfaction'])
 
+print('pi pe ci ce sat')
+for i, e, ci, ce, s in zip(post_IS, post_ES, comment_IS, comment_ES, satisfaction):
+    print(i, e, ci, ce, s)
+
 data = []
 for i in range(len(post_IS)):
     data.append([[post_IS[i], post_ES[i], comment_IS[i], comment_ES[i]], satisfaction[i]])
