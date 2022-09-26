@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import IS_ES_separate_regressor
+import math
+import gc
 
 import torch
 import torch.nn as nn
@@ -23,7 +25,6 @@ import csv
 
 import sys
 sys.path.append('../custom_transformers')
-
 
 data_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/seeker_satisfaction_1000_thread.csv', encoding='ISO-8859-1')
 # post_titles = list(data_df['post_title'])
@@ -76,6 +77,14 @@ def split_df(df):
 post_df, post_inputs_train, post_input_test, post_labels_train, post_labels_test, post_utc_train, post_utc_test, post_vote_train, post_vote_test = split_df(post_df)
 comment_df, comment_inputs_train, comment_input_test, comment_labels_train, comment_labels_test, comment_utc_train, comment_utc_test, comment_vote_train, comment_vote_test = split_df(comment_df)
 
+utc_mean = np.mean(post_utc_train)
+utc_std = np.std(post_utc_train)
+
+post_utc_train = list(map(lambda x:(x-utc_mean) / utc_std, post_utc_train))
+comment_utc_train = list(map(lambda x:(x-utc_mean) / utc_std, comment_utc_train))
+post_utc_test = list(map(lambda x:(x-utc_mean) / utc_std, post_utc_test))
+comment_utc_test = list(map(lambda x:(x-utc_mean) / utc_std, post_utc_test))
+
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
 
 
@@ -101,14 +110,14 @@ def generate_dataloader(df, labels_train, labels_test, utc_train, utc_test, vote
     input_ids_train = encoded_data_train['input_ids']
     attention_masks_train = encoded_data_train['attention_mask']
     labels_train = torch.tensor(labels_train, dtype=torch.float32)
-    utc_train = torch.tensor(utc_train, dtype=torch.int)
-    vote_train = torch.tensor(vote_train, dtype=torch.int)
+    utc_train = torch.tensor(utc_train, dtype=torch.float32)
+    vote_train = torch.tensor(vote_train, dtype=torch.float32)
 
     input_ids_test = encoded_data_test['input_ids']
     attention_masks_test = encoded_data_test['attention_mask']
     labels_test = torch.tensor(labels_test, dtype=torch.float32)
-    utc_test = torch.tensor(utc_test, dtype=torch.int)
-    vote_test = torch.tensor(vote_test, dtype=torch.int)
+    utc_test = torch.tensor(utc_test, dtype=torch.float32)
+    vote_test = torch.tensor(vote_test, dtype=torch.float32)
 
     dataset_train = TensorDataset(input_ids_train, attention_masks_train, labels_train, utc_train, vote_train)
     dataset_test = TensorDataset(input_ids_test, attention_masks_test, labels_test, utc_test, vote_test)
@@ -119,7 +128,7 @@ def generate_dataloader(df, labels_train, labels_test, utc_train, utc_test, vote
     return dataloader_train, dataloader_test
 
 
-batch_size = 3
+batch_size = 8
 
 post_dataloader_train, post_dataloader_test = generate_dataloader(post_df, post_labels_train, post_labels_test,
                                                                   post_utc_train, post_utc_test,
@@ -140,9 +149,9 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         self.bert_post = BertModel(config)
         self.bert_comment = BertModel(config)
         self.bert_post_IS = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=1)
-        self.bert_post_ES = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=3)
-        self.bert_comment_IS = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=3)
-        self.bert_comment_ES = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=3)
+        self.bert_post_ES = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=1)
+        self.bert_comment_IS = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=1)
+        self.bert_comment_ES = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=1)
         self.classifier = nn.Linear(config.hidden_size*2, 768)
         self.classifier2 = nn.Linear(config.hidden_size*2, 768)
         self.classifier3 = nn.Linear(config.hidden_size+7, 1)
@@ -190,8 +199,8 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
             model.eval()
             inputs = {'input_ids': ids,
                       'attention_mask': attention_mask}
-
-            score = model(**inputs)
+            with torch.no_grad():
+                score = model(**inputs)
             return score
 
         post_IS_label = get_support_score(self.bert_post_IS, post_input_ids, post_attention_mask)
@@ -199,6 +208,8 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         comment_IS_label = get_support_score(self.bert_comment_IS, comment_input_ids, comment_attention_mask)
         comment_ES_label = get_support_score(self.bert_comment_ES, comment_input_ids, comment_attention_mask)
 
+        torch.cuda.empty_cache()
+        gc.collect()
         post_outputs = self.bert_post(
             post_input_ids,
             attention_mask=post_attention_mask,
@@ -212,6 +223,8 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         )
         post_pooled_output = post_outputs[1]
 
+        torch.cuda.empty_cache()
+        gc.collect()
         comment_outputs = self.bert_comment(
             comment_input_ids,
             attention_mask=comment_attention_mask,
@@ -254,6 +267,7 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
 
         output = self.classifier3(torch.cat((weight_result, post_IS_label, post_ES_label, comment_IS_label,
                                              comment_ES_label, utc_difference, post_vote, comment_vote), dim=1))
+        output = self.relu(output)
 
         loss = None
         self.config.problem_type = "regression"
@@ -281,7 +295,7 @@ else:
 
 model.to(device)
 
-optimizer = AdamW(model.parameters(), lr=1e-5, eps=1e-8)
+optimizer = AdamW(model.parameters(), lr=1e-4, eps=1e-8)
 
 epochs = 200
 
@@ -298,31 +312,33 @@ def evaluate(post_dataloader_val, comment_dataloader_val):
 
     predictions, true_vals = [], []
 
-    for p_batch, c_batch in zip(post_dataloader_val, comment_dataloader_val):
-        p_batch = tuple(b.to(device) for b in p_batch)
-        c_batch = tuple(b.to(device) for b in c_batch)
+    with torch.no_grad():
+        for p_batch, c_batch in zip(post_dataloader_val, comment_dataloader_val):
+            torch.cuda.empty_cache()
+            gc.collect()
+            p_batch = tuple(b.to(device) for b in p_batch)
+            c_batch = tuple(b.to(device) for b in c_batch)
 
-        inputs = {'post_input_ids': p_batch[0],
-                  'post_attention_mask': p_batch[1],
-                  'post_vote': p_batch[4],
-                  'comment_attention_mask': c_batch[1],
-                  'comment_input_ids': c_batch[0],
-                  'comment_vote': c_batch[4],
-                  'labels': p_batch[2],  # same in both batches.
-                  'utc_difference': p_batch[3],  # same in both batches.
-                  }
+            inputs = {'post_input_ids': p_batch[0],
+                      'post_attention_mask': p_batch[1],
+                      'post_vote': p_batch[4],
+                      'comment_attention_mask': c_batch[1],
+                      'comment_input_ids': c_batch[0],
+                      'comment_vote': c_batch[4],
+                      'labels': p_batch[2],  # same in both batches.
+                      'utc_difference': p_batch[3],  # same in both batches.
+                      }
 
-        with torch.no_grad():
             outputs = model(**inputs)
 
-        loss = outputs[0]
-        logits = outputs[1]
-        loss_val_total += loss.item()
+            loss = outputs[0]
+            logits = outputs[1]
+            loss_val_total += loss.item()
 
-        logits = logits.detach().cpu().numpy()
-        label_ids = inputs['labels'].cpu().numpy()
-        predictions.append(logits)
-        true_vals.append(label_ids)
+            logits = logits.detach().cpu().numpy()
+            label_ids = inputs['labels'].cpu().numpy()
+            predictions.append(logits)
+            true_vals.append(label_ids)
 
     loss_val_avg = loss_val_total / len(post_dataloader_val)
 
@@ -360,6 +376,8 @@ for epoch in tqdm(range(1, epochs + 1)):
                   'utc_difference': p_batch[3],  # same in both batches.
                   }
 
+        torch.cuda.empty_cache()
+        gc.collect()
         outputs = model(**inputs)
         loss = outputs[0]
         print(f'i : {i}, loss : {loss}')
@@ -383,14 +401,14 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'R^2 score: {r2_score(true_vals, predict)}')
 
     pred_df = pd.DataFrame(predictions)
-    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-5/epoch_{epoch}_predicted_vals.csv')
+    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-4/all_feature/epoch_{epoch}_predicted_vals.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
 
-with open(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-5/training_result.csv', 'w', newline='') as f:
+with open(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-4/all_feature/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
