@@ -81,7 +81,8 @@ class BertForMultiValueRegression(BertPreTrainedModel):
         self.config = config
 
         self.bert = BertModel(config)
-        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.classifier1 = nn.Linear(config.hidden_size, config.hidden_size//2)
+        self.classifier2 = nn.Linear(config.hidden_size//2, 1)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -98,6 +99,7 @@ class BertForMultiValueRegression(BertPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        satisfaction_model_mode: Optional[bool] = None,
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -114,10 +116,16 @@ class BertForMultiValueRegression(BertPreTrainedModel):
             return_dict=return_dict,
         )
         pooled_output = outputs[1]
-        logits = self.classifier(pooled_output)
+        output = self.classifier1(pooled_output)
+
+        if satisfaction_model_mode:
+            return output
+
+        logits = self.classifier2(output)
 
         if not labels:
             return logits
+
         else:
             loss = None
             self.config.problem_type = "regression"
@@ -128,6 +136,17 @@ class BertForMultiValueRegression(BertPreTrainedModel):
                 loss=loss,
                 logits=logits
             )
+        '''
+        loss = None
+        self.config.problem_type = "regression"
+        loss_fct = nn.MSELoss()
+        loss = loss_fct(logits.squeeze().to(torch.float32), labels.squeeze().to(torch.float32))
+
+        return modeling_outputs.SequenceClassifierOutput(
+            loss=loss,
+            logits=logits
+        )
+        '''
 
 
 def train_model_and_save(dataloader_train, dataloader_val, target):
@@ -158,8 +177,9 @@ def train_model_and_save(dataloader_train, dataloader_val, target):
             v_batch = tuple(b.to(device) for b in v_batch)
 
             v_inputs = {'input_ids': v_batch[0],
-                      'attention_mask': v_batch[1],
-                      'labels': v_batch[2]  # same in both batches.
+                        'attention_mask': v_batch[1],
+                        'labels': v_batch[2],  # same in both batches.
+                        'satisfaction_model_mode': False
                       }
 
             with torch.no_grad():
@@ -197,10 +217,11 @@ def train_model_and_save(dataloader_train, dataloader_val, target):
         for batch in dataloader_train:
             model.zero_grad()
             batch = tuple(b.to(device) for b in batch)
-
+            satisfaction_model_mode = False
             inputs = {'input_ids': batch[0],
                       'attention_mask': batch[1],
-                      'labels': batch[2]  # same in both batches.
+                      'labels': batch[2],  # same in both batches.
+                      'satisfaction_model_mode': satisfaction_model_mode
                       }
 
             outputs = model(**inputs)
@@ -228,15 +249,15 @@ def train_model_and_save(dataloader_train, dataloader_val, target):
 
         pred_df = pd.DataFrame(predictions)
         pred_df.to_csv(
-            f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/batch_{batch_size}_lr_1e-5/{target}/epoch_{epoch}_predicted_vals.csv')
+            f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/batch_{batch_size}_lr_1e-5/model2/{target}/epoch_{epoch}_predicted_vals.csv')
 
         training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
-        torch.save(model.state_dict(), f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model/{target}/epoch_{epoch}.model')
+        torch.save(model.state_dict(), f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model2/{target}/epoch_{epoch}.model')
 
     fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
 
     with open(
-            f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/batch_{batch_size}_lr_1e-5/{target}/training_result.csv',
+            f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/batch_{batch_size}_lr_1e-5/model2/{target}/training_result.csv',
             'w', newline='') as f:
         # using csv.writer method from CSV package
         write = csv.writer(f)
@@ -304,4 +325,5 @@ if __name__ == '__main__':
 
     targets = ['post_IS', 'post_ES', 'comment_IS', 'comment_ES']
     for train_dl, test_dl, target in zip(train_list, test_list, targets):
+        print(target)
         train_model_and_save(train_dl, train_dl, target)

@@ -154,7 +154,7 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         self.bert_comment_ES = IS_ES_separate_regressor.BertForMultiValueRegression.from_pretrained('bert-base-uncased', num_labels=1)
         self.classifier = nn.Linear(config.hidden_size*2, 768)
         self.classifier2 = nn.Linear(config.hidden_size*2, 768)
-        self.classifier3 = nn.Linear(config.hidden_size+7, 1)
+        self.classifier3 = nn.Linear(config.hidden_size+(config.hidden_size*2)+3, 1)
         self.dropout = nn.Dropout(p=0.1)
         self.relu = nn.ReLU()
 
@@ -183,30 +183,31 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         self.bert_post_IS.load_state_dict(
-            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model/post_IS/epoch_50.model',
-                       map_location='cuda:0'))
+            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model2/post_IS/epoch_50.model'))
+        self.bert_post_IS.to(device)
         self.bert_post_ES.load_state_dict(
-            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model/post_ES/epoch_50.model',
-                       map_location='cuda:0'))
+            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model2/post_ES/epoch_50.model'))
+        self.bert_post_ES.to(device)
         self.bert_comment_IS.load_state_dict(
-            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model/comment_IS/epoch_46.model',
-                       map_location='cuda:0'))
+            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model2/comment_IS/epoch_49.model'))
+        self.bert_comment_IS.to(device)
         self.bert_comment_ES.load_state_dict(
-            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model/comment_ES/epoch_50.model',
-                       map_location='cuda:0'))
+            torch.load(f'../predicting-satisfaction-using-graphs/csv/IS_ES_regressor/model2/comment_ES/epoch_50.model'))
+        self.bert_comment_ES.to(device)
 
         def get_support_score(model, ids, attention_mask):
             model.eval()
             inputs = {'input_ids': ids,
-                      'attention_mask': attention_mask}
+                      'attention_mask': attention_mask,
+                      'satisfaction_model_mode': True}
             with torch.no_grad():
-                score = model(**inputs)
-            return score
+                score_output = model(**inputs)
+            return score_output
 
-        post_IS_label = get_support_score(self.bert_post_IS, post_input_ids, post_attention_mask)
-        post_ES_label = get_support_score(self.bert_post_ES, post_input_ids, post_attention_mask)
-        comment_IS_label = get_support_score(self.bert_comment_IS, comment_input_ids, comment_attention_mask)
-        comment_ES_label = get_support_score(self.bert_comment_ES, comment_input_ids, comment_attention_mask)
+        post_IS_output = get_support_score(self.bert_post_IS, post_input_ids, post_attention_mask)
+        post_ES_output = get_support_score(self.bert_post_ES, post_input_ids, post_attention_mask)
+        comment_IS_output = get_support_score(self.bert_comment_IS, comment_input_ids, comment_attention_mask)
+        comment_ES_output = get_support_score(self.bert_comment_ES, comment_input_ids, comment_attention_mask)
 
         torch.cuda.empty_cache()
         gc.collect()
@@ -240,8 +241,9 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
 
         concat_result = self.classifier(torch.cat((post_pooled_output, comment_pooled_output), dim=1))  # should be b * (768*2) -> b * 768
         # activation function -> dropout
-        concat_result = self.relu(concat_result)
         concat_result = self.dropout(concat_result)
+        concat_result = self.relu(concat_result)
+
         # dot product
         inner_list = []
 
@@ -252,10 +254,12 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         inner = torch.stack(inner_list)
 
         weight_result = self.classifier2(torch.cat((concat_result, inner), dim=1))
-        weight_result = self.relu(weight_result)
         weight_result = self.dropout(weight_result)
+        weight_result = self.relu(weight_result)
 
         utc_list, post_vote_list, comment_vote_list = [], [], []
+        # post_vote_list, comment_vote_list = [], []
+        # utc_list = []
         for i in range(len(utc_difference)):
             utc_list.append([utc_difference[i]])
             post_vote_list.append([post_vote[i]])
@@ -265,8 +269,9 @@ class ConcatWeightBertForSequenceClassification(BertPreTrainedModel):
         post_vote = torch.Tensor(post_vote_list).to('cuda')
         comment_vote = torch.Tensor(comment_vote_list).to('cuda')
 
-        output = self.classifier3(torch.cat((weight_result, post_IS_label, post_ES_label, comment_IS_label,
-                                             comment_ES_label, utc_difference, post_vote, comment_vote), dim=1))
+        output = self.classifier3(torch.cat((weight_result, post_IS_output, post_ES_output,
+                                             comment_IS_output, comment_ES_output,
+                                             utc_difference, post_vote, comment_vote), dim=1))
         output = self.relu(output)
 
         loss = None
@@ -401,14 +406,14 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'R^2 score: {r2_score(true_vals, predict)}')
 
     pred_df = pd.DataFrame(predictions)
-    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-4/all_feature/epoch_{epoch}_predicted_vals.csv')
+    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-4/model2/epoch_{epoch}_predicted_vals.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, r2_score(true_vals, predict)])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
 
-with open(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-4/all_feature/training_result.csv', 'w', newline='') as f:
+with open(f'../predicting-satisfaction-using-graphs/csv/satisfaction_model/batch_{batch_size}_lr_1e-4/model2/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
