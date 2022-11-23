@@ -21,7 +21,7 @@ data_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/avg_s
 
 post_contents = list(data_df['postContent'])
 comment_bodies = list(data_df['commentContent'])
-satisfactions = list(data_df['satisfy_composite'])
+satisfactions = list(data_df['avg_satisfy_4'])
 
 data = []
 

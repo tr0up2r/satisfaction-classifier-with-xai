@@ -10,21 +10,30 @@ from sklearn.metrics import r2_score
 import csv
 
 
-data_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/seeker_satisfaction_1000_thread.csv', encoding='ISO-8859-1')
+# data_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/seeker_satisfaction_1000_thread.csv', encoding='ISO-8859-1')
+data_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/all_satisfaction_raw_0-999.csv', encoding='ISO-8859-1')
 
 post_IS = list(data_df['post_IS'])
 post_ES = list(data_df['post_ES'])
 comment_IS = list(data_df['comment_IS'])
 comment_ES = list(data_df['comment_ES'])
-satisfaction = list(data_df['satisfaction'])
+satisfaction = list(data_df['avg_satisfy_1'])
+familiarity = list(data_df['familiarity'])
+tenure = list(data_df['post_tenure'])
 
-print('pi pe ci ce sat')
-for i, e, ci, ce, s in zip(post_IS, post_ES, comment_IS, comment_ES, satisfaction):
-    print(i, e, ci, ce, s)
+tenure_mean = np.mean(tenure)
+tenure_std = np.std(tenure)
+# z-score
+tenure = list(map(lambda x:(x-tenure_mean) / tenure_std, tenure))
+print(tenure)
+
+# print('pi pe ci ce sat')
+# for i, e, ci, ce, s in zip(post_IS, post_ES, comment_IS, comment_ES, satisfaction):
+#     print(i, e, ci, ce, s)
 
 data = []
 for i in range(len(post_IS)):
-    data.append([[post_IS[i], post_ES[i], comment_IS[i], comment_ES[i]], satisfaction[i]])
+    data.append([[post_IS[i], post_ES[i], comment_IS[i], comment_ES[i], familiarity[i], tenure[i]], satisfaction[i]])
 data = pd.DataFrame(data, columns=['x', 'y'])
 
 # train-test split
@@ -49,8 +58,8 @@ test_dl = DataLoader(test_data, batch_size, shuffle=True)
 class Regressor(nn.Module):
     def __init__(self):
         super(Regressor, self).__init__()
-        self.fc1 = nn.Linear(4, 2)
-        self.fc2 = nn.Linear(2, 1)
+        self.fc1 = nn.Linear(6, 3)
+        self.fc2 = nn.Linear(3, 1)
 
     def forward(self, x):
         logit = self.fc2(self.fc1(x))
@@ -83,15 +92,15 @@ def regression(num_epochs, model, loss_fun, optimizer, train_dl, test_dl):
 
         training_result.append([epoch, avg_loss / len(train_dl), val_loss, r2score])
 
-        pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/fcregressor/epoch_{epoch}_predicted_vals.csv')
+        pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/fcregressor2/epoch_{epoch}_predicted_vals.csv')
 
         # validation_loss, r2 = evaluate(test_dl)
-    true_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/fcregressor/true_vals.csv')
+    true_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/fcregressor2/true_vals.csv')
 
     fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
 
     with open(
-            f'../predicting-satisfaction-using-graphs/csv/fcregressor/training_result.csv',
+            f'../predicting-satisfaction-using-graphs/csv/fcregressor2/training_result.csv',
             'w', newline='') as f:
         # using csv.writer method from CSV package
         write = csv.writer(f)
