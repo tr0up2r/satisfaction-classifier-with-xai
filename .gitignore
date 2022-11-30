@@ -4,6 +4,7 @@
 *.png
 *.eps
 *.out
+*.model
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
