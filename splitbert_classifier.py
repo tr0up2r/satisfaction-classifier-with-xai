@@ -25,6 +25,38 @@ from spacy.lang.en import English
 max_sentences = 34
 
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        # print((position * div_term).shape)
+        # print(pe[:, 0::2].shape)
+        # print(pe[:, 1::2].shape)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        # print(pe.shape)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        # print(pe.shape)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # print(x.shape)
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+
+
+pe = PositionalEncoding(768, max_len=34)
+x = torch.FloatTensor(max_sentences, 1, 768).long()
+x = pe(x)
+# print(x)
+# print(x.shape)
+# print(x.shape)
+# print(x)
+
+
 class SplitBertModel(BertPreTrainedModel):
 
     def __init__(self, config):
@@ -37,12 +69,13 @@ class SplitBertModel(BertPreTrainedModel):
         self.fc_layer = nn.Linear(768, 768)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.pe = PositionalEncoding(768, max_len=max_sentences)
 
-        self.softmax = nn.Softmax()
         self.dropout = nn.Dropout(0.2)
         self.relu = nn.ReLU()
         self.classifier1 = nn.Linear(768, 768//2)
         self.classifier2 = nn.Linear(768//2, config.num_labels)
+        self.classifier3 = nn.Linear(768, config.num_labels)
         self.post_init()
 
     def forward(
@@ -53,11 +86,7 @@ class SplitBertModel(BertPreTrainedModel):
             labels: Optional[torch.tensor] = None
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
-        sent_count_list = []
         batch_embeddings = torch.empty(size=(len(input_ids), 1, max_sentences, 768), requires_grad=True).to('cuda')
-        # print(batch_embeddings)
-
-        # print(self.classifier.requires_grad_())
         for i in range(len(input_ids)):
 
             bert_outputs = torch.empty(size=(max_sentences, 1, 768)).to('cuda')
@@ -77,61 +106,26 @@ class SplitBertModel(BertPreTrainedModel):
             batch_embeddings[i] = outputs['pooler_output'].unsqueeze(0)
             '''
 
-            # print(batch_embeddings.shape)
-
-            # print(batch_embeddings)
-
             for j in range(sentence_count[i].item()):
                 outputs = self.bert(
                     input_ids[i][j].unsqueeze(0),
                     attention_mask=attention_mask[i][j].unsqueeze(0)
                 )
                 bert_outputs[j] = outputs['pooler_output']
-                # print(self.fc_layer(bert_outputs[j]).shape)
-                # bert_outputs[j] = self.fc_layer(bert_outputs[j])
                 bert_outputs[j] = bert_outputs[j]
-                # print(bert_outputs[j])
-                # print(bert_outputs[j].shape)
 
             for j in range(sentence_count[i].item(), max_sentences):
                 bert_outputs[j] = torch.zeros(1, 768).to('cuda')
 
-            # print(bert_outputs)
-            # print(bert_outputs)
-            # print(self.fc_layer(bert_outputs))
-            # print(bert_outputs.shape)
-
-            # print(self.embedding.weight.shape)
-
+            # nn.Embedding
             # bert_outputs_embedding = self.embedding(bert_outputs.swapaxes(0, 1).squeeze().long())
             # bert_outputs_embedding = bert_outputs_embedding.swapaxes(1, 2).swapaxes(0, 1)
-            # print(bert_outputs_embedding.shape)
-            # print(bert_outputs.swapaxes(0, 1).squeeze().shape)
+            # batch_embeddings[i] = bert_outputs_embedding
+
+            # nn.Linear
             bert_outputs_fc = self.fc_layer(bert_outputs)
             bert_outputs_fc = bert_outputs_fc.swapaxes(0, 1)
             batch_embeddings[i] = bert_outputs_fc
-            # batch_embeddings[i] = bert_outputs_embedding
-
-
-
-        '''
-        for embeddings, sent_count in zip(batch_embeddings, sent_count_list):
-            # need to be with mask
-            embeddings = embeddings.swapaxes(0, 1)
-            # ones = torch.ones(max_sentences, sent_count).to('cuda')
-            # zeros = torch.zeros(max_sentences, max_sentences-sent_count).to('cuda')
-
-            zeros = torch.zeros(1, sent_count).to('cuda')
-            ones = torch.ones(1, max_sentences-sent_count).to('cuda')
-            src_key_padding_mask = torch.cat([zeros, ones], dim=1).type(torch.bool)
-
-            encoder_output = self.encoder(embeddings, src_key_padding_mask=src_key_padding_mask)[0][0]
-            # encoder_output = encoder_output.masked_fill(torch.isnan(encoder_output), 0)
-            encoder_outputs.append(encoder_output)
-        '''
-
-
-        # print(batch_embeddings.shape)
 
         def make_src_mask(sz):
             mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
@@ -141,61 +135,56 @@ class SplitBertModel(BertPreTrainedModel):
         encoder_outputs = torch.empty(size=(len(input_ids), 768), requires_grad=True).to('cuda')
 
         for embeddings, count, i in zip(batch_embeddings, sentence_count, range(len(input_ids))):
-            # ones = torch.ones(max_sentences, count.item()).to('cuda')
-            # zeros = torch.zeros(max_sentences, max_sentences - count.item()).to('cuda')
-            # src_mask = torch.cat([ones, zeros], dim=1).to('cuda')
-            # src_mask = torch.zeros(max_sentences, max_sentences).to('cuda').type(torch.bool)
             embeddings = embeddings.swapaxes(0, 1)
 
-            src_mask = make_src_mask(max_sentences)
+            # add positional encoding
+            embeddings = self.pe(embeddings)
 
-            # print(src_mask)
+            src_mask = make_src_mask(max_sentences)
 
             zeros = torch.zeros(1, count.item()).to('cuda')
             ones = torch.ones(1, max_sentences - count.item()).to('cuda')
             src_key_padding_mask = torch.cat([zeros, ones], dim=1).type(torch.bool)
 
-            # print(embeddings.shape)
-            # print(src_mask.shape)
-            # print(src_key_padding_mask.shape)
 
-            # print(embeddings)
+            # first output
+            '''
             encoder_output = self.encoder(embeddings,
                                           mask=src_mask,
                                           src_key_padding_mask=src_key_padding_mask)[0][0]
+            '''
 
-            encoder_output_print = self.encoder(embeddings,
+            encoder_output = self.encoder(embeddings,
                                           mask=src_mask,
                                           src_key_padding_mask=src_key_padding_mask)
 
-            for output in encoder_output_print:
-                print(output)
-            # print(encoder_output_print.shape)
+            # mean
+            encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
 
+            # last output
+            # encoder_output = encoder_output[count-1].squeeze(0)
 
             encoder_outputs[i] = encoder_output
-            # print(encoder_output.shape)
 
-        # print(encoder_outputs.shape)
-
-        # encoder_outputs = torch.stack(encoder_outputs, dim=0).to('cuda')
-        # print(encoder_outputs.shape)
+        # print(encoder_outputs)
         encoder_outputs = self.classifier1(encoder_outputs)
-        encoder_outputs = self.dropout(encoder_outputs)
-        encoder_outputs = self.relu(encoder_outputs)
+
+
+        # print(encoder_outputs)
+        # encoder_outputs = self.dropout(encoder_outputs)
+
+        # print(encoder_outputs)
+        # encoder_outputs = self.relu(encoder_outputs)
+        # print(encoder_outputs)
         logits = self.classifier2(encoder_outputs)
-        # print(logits)
+        # logits = self.classifier3(encoder_outputs)
         loss_fct = nn.CrossEntropyLoss()
-        # loss_fct = nn.NLLLoss()
-        # loss_fct = nn.BCEWithLogitsLoss(reduction='sum')
-
         loss = loss_fct(logits.squeeze(), labels.squeeze())
-        # loss = loss_fct(nn.functional.log_softmax(logits, dim=1).squeeze(), labels.squeeze())
 
-        # print(loss)
         return modeling_outputs.SequenceClassifierOutput(
             loss=loss,
-            logits=logits
+            logits=logits,
+            hidden_states=encoder_outputs
         )
 
 
@@ -245,8 +234,6 @@ df = pd.DataFrame(data, columns=columns)
 idx_train, idx_remain = train_test_split(df.index.values, test_size=0.20, random_state=42)
 idx_val, idx_test = train_test_split(idx_remain, test_size=0.50, random_state=42)
 
-# print(idx_train.shape, idx_val.shape, idx_test.shape)
-
 train_df = df.iloc[idx_train]
 val_df = df.iloc[idx_val]
 test_df = df.iloc[idx_test]
@@ -261,8 +248,6 @@ for label in labels:
     tmp = train_df[train_df['label'] == label]
     tmp_sampled = tmp.sample(frac=1).iloc[:count_min_label]
     train_sample_df = pd.concat([train_sample_df, tmp_sampled])
-
-# print(train_sample_df.contents.values[0])
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
                                           do_lower_case=True)
@@ -285,8 +270,6 @@ def conduct_input_ids_and_attention_masks(str_values, score_values):
     input_ids_list = []
     attention_masks_list = []
     sentence_count_list = []
-
-    # print(str_values)
 
     for contents in str_values:
         result = tokenizer.batch_encode_plus(
@@ -333,12 +316,10 @@ for param in model.bert.parameters():
     param.requires_grad = False
 
 optimizer = AdamW(model.parameters(),
-                  lr=2e-4,
+                  lr=2e-3,
                   eps=1e-8)
 
-epochs = 10
-# print(model.parameters())
-
+epochs = 5
 batch_size = 4
 
 dataloader_train = DataLoader(dataset_train,
@@ -403,6 +384,7 @@ def evaluate(dataloader_val):
         logits = outputs[1]
         loss_val_total += loss.item()
         logits = logits.detach().cpu().numpy()
+        # print(outputs[2])
 
         label_ids = batch[3].cpu().numpy()
 
@@ -436,15 +418,13 @@ for epoch in tqdm(range(1, epochs + 1)):
         batch = tuple(b.to(device) for b in batch)
         one_hot_labels = torch.nn.functional.one_hot(batch[3], num_classes=len(labels))
 
-        # print(one_hot_labels.type(torch.float))
-        # print(batch[2])
-
         inputs = {'input_ids': batch[0],
                   'attention_mask': batch[1],
                   'sentence_count': batch[2],
                   'labels': one_hot_labels.type(torch.float),
                   }
 
+        # check parameters are training
         '''
         for name, param in model.named_parameters():
             if not param.requires_grad:
