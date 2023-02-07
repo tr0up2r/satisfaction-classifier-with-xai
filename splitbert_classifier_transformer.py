@@ -67,8 +67,11 @@ class SplitBertModel(BertPreTrainedModel):
         self.bert = BertModel(config)
         self.embedding = nn.Embedding(768, 1)
         self.fc_layer = nn.Linear(768, 768)
+        # self.transformer = nn.Transformer(d_model=768, nhead=8, num_encoder_layers=1)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.decoder_layer = nn.TransformerDecoderLayer(d_model=768, nhead=8)
+        self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=1)
         self.pe = PositionalEncoding(768, max_len=max_sentences)
 
         self.dropout = nn.Dropout(0.2)
@@ -132,7 +135,7 @@ class SplitBertModel(BertPreTrainedModel):
             mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0)).to('cuda')
             return mask
 
-        encoder_outputs = torch.empty(size=(len(input_ids), 768), requires_grad=True).to('cuda')
+        outputs = torch.empty(size=(len(input_ids), 768), requires_grad=True).to('cuda')
 
         for embeddings, count, i in zip(batch_embeddings, sentence_count, range(len(input_ids))):
             embeddings = embeddings.swapaxes(0, 1)
@@ -148,26 +151,41 @@ class SplitBertModel(BertPreTrainedModel):
 
 
             # first output
+
             '''
             encoder_output = self.encoder(embeddings,
                                           mask=src_mask,
                                           src_key_padding_mask=src_key_padding_mask)[0][0]
             '''
 
+            
+
             encoder_output = self.encoder(embeddings,
                                           mask=src_mask,
                                           src_key_padding_mask=src_key_padding_mask)
 
+            # same shape: embeddings & encoder_output
+
             # mean
-            encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
+            # encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
 
             # last output
             # encoder_output = encoder_output[count-1].squeeze(0)
 
-            encoder_outputs[i] = encoder_output
+            # encoder_outputs[i] = encoder_output
+
+            decoder_output = self.decoder(tgt=embeddings, memory=encoder_output,
+                                          tgt_mask=src_mask,
+                                          tgt_key_padding_mask=src_key_padding_mask)[0][0]
+
+            # print(decoder_output)
+
+            outputs[i] = decoder_output
+
+            # print(decoder_output.shape)
 
         # print(encoder_outputs)
-        encoder_outputs = self.classifier1(encoder_outputs)
+        outputs = self.classifier1(outputs)
 
 
         # print(encoder_outputs)
@@ -176,7 +194,7 @@ class SplitBertModel(BertPreTrainedModel):
         # print(encoder_outputs)
         # encoder_outputs = self.relu(encoder_outputs)
         # print(encoder_outputs)
-        logits = self.classifier2(encoder_outputs)
+        logits = self.classifier2(outputs)
         # logits = self.classifier3(encoder_outputs)
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(logits.squeeze(), labels.squeeze())
@@ -184,7 +202,7 @@ class SplitBertModel(BertPreTrainedModel):
         return modeling_outputs.SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=encoder_outputs
+            hidden_states=outputs
         )
 
 
@@ -248,8 +266,6 @@ for label in labels:
     tmp = train_df[train_df['label'] == label]
     tmp_sampled = tmp.sample(frac=1).iloc[:count_min_label]
     train_sample_df = pd.concat([train_sample_df, tmp_sampled])
-
-train_sample_df = train_sample_df.sample(frac=1)
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
                                           do_lower_case=True)
@@ -318,7 +334,7 @@ for param in model.bert.parameters():
     param.requires_grad = False
 
 optimizer = AdamW(model.parameters(),
-                  lr=2e-4,
+                  lr=2e-3,
                   eps=1e-8)
 
 epochs = 5
