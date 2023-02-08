@@ -45,9 +45,6 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        # print((position * div_term).shape)
-        # print(pe[:, 0::2].shape)
-        # print(pe[:, 1::2].shape)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         # print(pe.shape)
@@ -56,7 +53,6 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        # print(x.shape)
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
@@ -64,10 +60,6 @@ class PositionalEncoding(nn.Module):
 pe = PositionalEncoding(embedding_size, max_len=34)
 x = torch.FloatTensor(max_sentences, 1, embedding_size).long()
 x = pe(x)
-# print(x)
-# print(x.shape)
-# print(x.shape)
-# print(x)
 
 
 class SplitBertModel(BertPreTrainedModel):
@@ -136,9 +128,6 @@ class SplitBertModel(BertPreTrainedModel):
         batch_decoder_embeddings = get_batch_embeddings(comment_input_ids, comment_attention_mask,
                                                         comment_sentence_count, max_comment, batch_decoder_embeddings)
 
-        # print(batch_encoder_embeddings.shape)
-        # print(batch_decoder_embeddings.shape)
-
         def make_masks(max_sentences, count):
             mask = (torch.triu(torch.ones(max_sentences, max_sentences)) == 1).transpose(0, 1)
             mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0)).to('cuda')
@@ -176,8 +165,6 @@ class SplitBertModel(BertPreTrainedModel):
 
             decoder_output = torch.mean(decoder_output[:c_count], dim=0).squeeze(0)
 
-            # print(decoder_output)
-            # print(decoder_output.shape)
             outputs[i] = decoder_output
 
         outputs = self.classifier1(outputs)
@@ -226,20 +213,25 @@ for s in satisfactions_float:
     else:
         satisfactions.append(2)
 
+# print(satisfactions_float)
+# print(satisfactions)
+
 data = []
 
 max_post = 0
 max_comment = 0
-for post, comment, satisfaction in zip(post_sequences, comment_sequences, satisfactions):
+for post, comment, satisfaction, satisfaction_float in zip(post_sequences, comment_sequences,
+                                                           satisfactions, satisfactions_float):
     if len(post) > max_post:
         max_post = len(post)
     if len(comment) > max_comment:
         max_comment = len(comment)
-    data.append([post, comment, satisfaction])
+    data.append([post, comment, satisfaction, satisfaction_float])
 
+# max_post_sentences: 29, max_comment_sentences: 10
 print(max_post, max_comment)
 
-columns = ['post_contents', 'comment_contents', 'label']
+columns = ['post_contents', 'comment_contents', 'label', 'score']
 df = pd.DataFrame(data, columns=columns)
 
 # data split (train & test sets)
@@ -269,21 +261,8 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
 print(train_sample_df.post_contents.values[0])
 print(train_sample_df.comment_contents.values[0])
 
-# 이렇게 하면 한 document에 대해 input_ids가 문장 단위로 쪼개져서 나옴.
-'''
-result = tokenizer.batch_encode_plus(
-    train_sample_df.contents.values[0],
-    add_special_tokens=True,
-    return_attention_mask=True,
-    pad_to_max_length=True,
-    max_length=512,
-    return_tensors='pt'
-)
 
-'''
-
-
-def conduct_input_ids_and_attention_masks(str_values, score_values, max_sentences_list):
+def conduct_input_ids_and_attention_masks(str_values, label_values, score_values, max_sentences_list):
     tensor_datasets = []
     pc_input_ids = []
     pc_attention_masks = []
@@ -320,19 +299,22 @@ def conduct_input_ids_and_attention_masks(str_values, score_values, max_sentence
 
         print(input_ids.shape, attention_masks.shape, sentence_counts.shape)
 
-    labels = torch.tensor(score_values.astype(int))
+    labels = torch.tensor(label_values.astype(int))
+    scores = torch.tensor(score_values.astype(float))
 
     # 0: posts / 1: comments
     return TensorDataset(pc_input_ids[0], pc_input_ids[1],
                          pc_attention_masks[0], pc_attention_masks[1],
-                         pc_sentence_count[0], pc_sentence_count[1], labels)
+                         pc_sentence_count[0], pc_sentence_count[1], labels, scores)
 
 
-dataset_train = conduct_input_ids_and_attention_masks([train_sample_df.post_contents.values, train_sample_df.comment_contents.values],
-                                                      train_sample_df.label.values, [max_post, max_comment])
+dataset_train = conduct_input_ids_and_attention_masks([train_sample_df.post_contents.values,
+                                                       train_sample_df.comment_contents.values],
+                                                      train_sample_df.label.values, train_sample_df.score.values,
+                                                      [max_post, max_comment])
 
 dataset_val = conduct_input_ids_and_attention_masks([val_df.post_contents.values, val_df.comment_contents.values],
-                                                    val_df.label.values, [max_post, max_comment])
+                                                    val_df.label.values, val_df.score.values, [max_post, max_comment])
 
 
 model = SplitBertModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2', num_labels=len(labels))
@@ -343,7 +325,7 @@ optimizer = AdamW(model.parameters(),
                   lr=2e-4,
                   eps=1e-8)
 
-epochs = 20
+epochs = 10
 batch_size = 4
 
 dataloader_train = DataLoader(dataset_train,
@@ -389,7 +371,7 @@ def evaluate(dataloader_val):
     model.eval()
     loss_val_total = 0
 
-    predictions, true_vals = [], []
+    embeddings, predictions, true_vals, true_scores = [], [], [], []
 
     for batch in dataloader_val:
         batch = tuple(b.to(device) for b in batch)
@@ -409,25 +391,29 @@ def evaluate(dataloader_val):
 
         loss = outputs[0]
         logits = outputs[1]
+        hidden_states = outputs[2]
         loss_val_total += loss.item()
+
+        hidden_states = hidden_states.detach().cpu().numpy()
         logits = logits.detach().cpu().numpy()
-        # print(outputs[2])
-
         label_ids = batch[6].cpu().numpy()
+        score_ids = batch[7].cpu().numpy()
 
+        embeddings.append(hidden_states)
         predictions.append(logits)
         true_vals.append(label_ids)
+        true_scores.append(score_ids)
 
     loss_val_avg = loss_val_total / len(dataloader_val)
 
+    embeddings = np.concatenate(embeddings, axis=0)
     predictions = np.concatenate(predictions, axis=0)
-    print(predictions)
     true_vals = np.concatenate(true_vals, axis=0)
-    print(true_vals)
+    true_scores = np.concatenate(true_scores, axis=0)
 
     accuracy_per_class(predictions, true_vals)
 
-    return loss_val_avg, predictions, true_vals
+    return loss_val_avg, embeddings, predictions, true_vals, true_scores
 
 
 model.to(device)
@@ -435,7 +421,7 @@ model.to(device)
 training_result = []
 
 for epoch in tqdm(range(1, epochs + 1)):
-    evaluation_result = []
+    result_for_tsne = []
     model.train()
     loss_train_total = 0
     progress_bar = tqdm(dataloader_train, desc='Epoch {:1d}'.format(epoch), leave=False, disable=False)
@@ -483,11 +469,24 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'\nEpoch {epoch}')
     loss_train_avg = loss_train_total / len(dataloader_train)
     tqdm.write(f'Training loss: {loss_train_avg}')
-    val_loss, predictions, true_vals = evaluate(dataloader_validation)
+    val_loss, embeddings, predictions, true_vals, true_scores = evaluate(dataloader_validation)
+
+    embeddings = embeddings.tolist()
+    preds_flat = np.argmax(predictions, axis=1).flatten()
+    labels_flat = true_vals.flatten()
+    scores_flat = true_scores.flatten()
+    print(type(embeddings))
+
     val_f1_macro, val_f1_micro = f1_score_func(predictions, true_vals)
     tqdm.write(f'Validation loss: {val_loss}')
     tqdm.write(f'F1 Score (Macro, Micro): {val_f1_macro}, {val_f1_micro}')
     training_result.append([epoch, loss_train_avg, val_loss, val_f1_macro, val_f1_micro])
+
+    print(len(embeddings), len(preds_flat), len(labels_flat), len(scores_flat))
+
+    tsne_df = pd.DataFrame({'embedding': embeddings, 'prediction': preds_flat,
+                            'label': labels_flat, 'score': scores_flat})
+    tsne_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/splitbert_classifier/epoch_{epoch}_result_for_tsne.csv')
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 
