@@ -19,10 +19,23 @@ from typing import Optional, Tuple, Union
 from sklearn.metrics import f1_score
 
 from spacy.lang.en import English
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModel
+
+
+# Mean Pooling - Take attention mask into account for correct averaging
+def mean_pooling(model_output, attention_mask):
+    token_embeddings = model_output[0] # First element of model_output contains all token embeddings
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+    # print(sum_mask)
+    return sum_embeddings / sum_mask
 
 
 # maximum sentence count (post + comment pair): 34
 max_sentences = 34
+embedding_size = 384
 
 
 class PositionalEncoding(nn.Module):
@@ -48,8 +61,8 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-pe = PositionalEncoding(768, max_len=34)
-x = torch.FloatTensor(max_sentences, 1, 768).long()
+pe = PositionalEncoding(embedding_size, max_len=34)
+x = torch.FloatTensor(max_sentences, 1, embedding_size).long()
 x = pe(x)
 # print(x)
 # print(x.shape)
@@ -64,138 +77,111 @@ class SplitBertModel(BertPreTrainedModel):
         self.num_labels = config.num_labels
         self.config = config
 
-        self.bert = BertModel(config)
-        self.embedding = nn.Embedding(768, 1)
-        self.fc_layer = nn.Linear(768, 768)
-        # self.transformer = nn.Transformer(d_model=768, nhead=8, num_encoder_layers=1)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=768, nhead=8)
+        self.sbert = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+        self.fc_layer = nn.Linear(embedding_size, embedding_size)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=embedding_size, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-        self.decoder_layer = nn.TransformerDecoderLayer(d_model=768, nhead=8)
+        self.decoder_layer = nn.TransformerDecoderLayer(d_model=embedding_size, nhead=8)
         self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=1)
-        self.pe = PositionalEncoding(768, max_len=max_sentences)
+        self.pe = PositionalEncoding(embedding_size, max_len=max_sentences)
 
         self.dropout = nn.Dropout(0.2)
         self.relu = nn.ReLU()
-        self.classifier1 = nn.Linear(768, 768//2)
-        self.classifier2 = nn.Linear(768//2, config.num_labels)
-        self.classifier3 = nn.Linear(768, config.num_labels)
+        self.classifier1 = nn.Linear(embedding_size, embedding_size//2)
+        self.classifier2 = nn.Linear(embedding_size//2, config.num_labels)
+        self.classifier3 = nn.Linear(embedding_size, config.num_labels)
         self.post_init()
 
     def forward(
             self,
-            input_ids: Optional[torch.tensor] = None,
-            attention_mask: Optional[torch.tensor] = None,
-            sentence_count: Optional[torch.tensor] = None,
+            post_input_ids: Optional[torch.tensor] = None,
+            comment_input_ids: Optional[torch.tensor] = None,
+            post_attention_mask: Optional[torch.tensor] = None,
+            comment_attention_mask: Optional[torch.tensor] = None,
+            post_sentence_count: Optional[torch.tensor] = None,
+            comment_sentence_count: Optional[torch.tensor] = None,
             labels: Optional[torch.tensor] = None
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
-        batch_embeddings = torch.empty(size=(len(input_ids), 1, max_sentences, 768), requires_grad=True).to('cuda')
-        for i in range(len(input_ids)):
+        current_batch_size = len(post_input_ids)
+        batch_encoder_embeddings = torch.empty(size=(current_batch_size, 1, max_post, embedding_size),
+                                               requires_grad=True).to('cuda')
+        batch_decoder_embeddings = torch.empty(size=(current_batch_size, 1, max_comment, embedding_size),
+                                               requires_grad=True).to('cuda')
 
-            bert_outputs = torch.empty(size=(max_sentences, 1, 768)).to('cuda')
+        def get_batch_embeddings(input_ids, attention_mask, sentence_count, max_sentences, batch_embeddings):
+            for i in range(len(input_ids)):
+                sbert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to('cuda')
 
-            '''
-            # print(input_ids.shape)
-            # print(input_ids[i][j].shape)
-            outputs = self.bert(
-                # torch.tensor([input_ids[i][j].tolist()]).to('cuda'),
-                # attention_mask=torch.tensor([attention_mask[i][j].tolist()]).to('cuda')
-                input_ids[i],
-                attention_mask=attention_mask[i]
-            )
-            # batch_embeddings.append(torch.tensor([outputs['pooler_output'].tolist()]).to('cuda'))
-            # print(outputs['pooler_output'].unsqueeze(0).shape)
-            # print(batch_embeddings[i].shape, outputs['pooler_output'].unsqueeze(0))
-            batch_embeddings[i] = outputs['pooler_output'].unsqueeze(0)
-            '''
+                model_output = self.sbert(input_ids[i][0:sentence_count[i]],
+                                          attention_mask=attention_mask[i][0:sentence_count[i]])
 
-            for j in range(sentence_count[i].item()):
-                outputs = self.bert(
-                    input_ids[i][j].unsqueeze(0),
-                    attention_mask=attention_mask[i][j].unsqueeze(0)
-                )
-                bert_outputs[j] = outputs['pooler_output']
-                bert_outputs[j] = bert_outputs[j]
+                model_output = mean_pooling(model_output, attention_mask[i][0:sentence_count[i]])
 
-            for j in range(sentence_count[i].item(), max_sentences):
-                bert_outputs[j] = torch.zeros(1, 768).to('cuda')
+                for j in range(sentence_count[i].item()):
+                    sbert_outputs[j] = model_output[j]
 
-            # nn.Embedding
-            # bert_outputs_embedding = self.embedding(bert_outputs.swapaxes(0, 1).squeeze().long())
-            # bert_outputs_embedding = bert_outputs_embedding.swapaxes(1, 2).swapaxes(0, 1)
-            # batch_embeddings[i] = bert_outputs_embedding
+                for j in range(sentence_count[i].item(), max_sentences):
+                    sbert_outputs[j] = torch.zeros(1, embedding_size).to('cuda')
 
-            # nn.Linear
-            bert_outputs_fc = self.fc_layer(bert_outputs)
-            bert_outputs_fc = bert_outputs_fc.swapaxes(0, 1)
-            batch_embeddings[i] = bert_outputs_fc
+                # nn.Linear
+                sbert_outputs_fc = self.fc_layer(sbert_outputs)
+                sbert_outputs_fc = sbert_outputs_fc.swapaxes(0, 1)
+                batch_embeddings[i] = sbert_outputs_fc
 
-        def make_src_mask(sz):
-            mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+            return batch_embeddings
+
+        batch_encoder_embeddings = get_batch_embeddings(post_input_ids, post_attention_mask,
+                                                        post_sentence_count, max_post, batch_encoder_embeddings)
+        batch_decoder_embeddings = get_batch_embeddings(comment_input_ids, comment_attention_mask,
+                                                        comment_sentence_count, max_comment, batch_decoder_embeddings)
+
+        # print(batch_encoder_embeddings.shape)
+        # print(batch_decoder_embeddings.shape)
+
+        def make_masks(max_sentences, count):
+            mask = (torch.triu(torch.ones(max_sentences, max_sentences)) == 1).transpose(0, 1)
             mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0)).to('cuda')
-            return mask
-
-        outputs = torch.empty(size=(len(input_ids), 768), requires_grad=True).to('cuda')
-
-        for embeddings, count, i in zip(batch_embeddings, sentence_count, range(len(input_ids))):
-            embeddings = embeddings.swapaxes(0, 1)
-
-            # add positional encoding
-            embeddings = self.pe(embeddings)
-
-            src_mask = make_src_mask(max_sentences)
 
             zeros = torch.zeros(1, count.item()).to('cuda')
             ones = torch.ones(1, max_sentences - count.item()).to('cuda')
-            src_key_padding_mask = torch.cat([zeros, ones], dim=1).type(torch.bool)
+            key_padding_mask = torch.cat([zeros, ones], dim=1).type(torch.bool)
 
+            return mask, key_padding_mask
 
-            # first output
+        outputs = torch.empty(size=(current_batch_size, embedding_size), requires_grad=True).to('cuda')
 
-            '''
-            encoder_output = self.encoder(embeddings,
-                                          mask=src_mask,
-                                          src_key_padding_mask=src_key_padding_mask)[0][0]
-            '''
+        for encoder_embeddings, decoder_embeddings, p_count, c_count, i in zip(batch_encoder_embeddings,
+                                                                              batch_decoder_embeddings,
+                                                                              post_sentence_count,
+                                                                              comment_sentence_count,
+                                                                              range(current_batch_size)):
+            encoder_embeddings = encoder_embeddings.swapaxes(0, 1)
+            decoder_embeddings = decoder_embeddings.swapaxes(0, 1)
 
-            
+            # add positional encoding
+            encoder_embeddings = self.pe(encoder_embeddings)
 
-            encoder_output = self.encoder(embeddings,
+            # make masks
+            src_mask, src_key_padding_mask = make_masks(max_post, p_count)
+            tgt_mask, tgt_key_padding_mask = make_masks(max_comment, c_count)
+
+            encoder_output = self.encoder(encoder_embeddings,
                                           mask=src_mask,
                                           src_key_padding_mask=src_key_padding_mask)
 
-            # same shape: embeddings & encoder_output
+            decoder_output = self.decoder(tgt=decoder_embeddings, memory=encoder_output,
+                                          tgt_mask=tgt_mask,
+                                          tgt_key_padding_mask=tgt_key_padding_mask)
 
-            # mean
-            # encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
-
-            # last output
-            # encoder_output = encoder_output[count-1].squeeze(0)
-
-            # encoder_outputs[i] = encoder_output
-
-            decoder_output = self.decoder(tgt=embeddings, memory=encoder_output,
-                                          tgt_mask=src_mask,
-                                          tgt_key_padding_mask=src_key_padding_mask)[0][0]
+            decoder_output = torch.mean(decoder_output[:c_count], dim=0).squeeze(0)
 
             # print(decoder_output)
-
+            # print(decoder_output.shape)
             outputs[i] = decoder_output
 
-            # print(decoder_output.shape)
-
-        # print(encoder_outputs)
         outputs = self.classifier1(outputs)
-
-
-        # print(encoder_outputs)
-        # encoder_outputs = self.dropout(encoder_outputs)
-
-        # print(encoder_outputs)
-        # encoder_outputs = self.relu(encoder_outputs)
-        # print(encoder_outputs)
         logits = self.classifier2(outputs)
-        # logits = self.classifier3(encoder_outputs)
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(logits.squeeze(), labels.squeeze())
 
@@ -242,10 +228,18 @@ for s in satisfactions_float:
 
 data = []
 
+max_post = 0
+max_comment = 0
 for post, comment, satisfaction in zip(post_sequences, comment_sequences, satisfactions):
-    data.append([post+comment, satisfaction])
+    if len(post) > max_post:
+        max_post = len(post)
+    if len(comment) > max_comment:
+        max_comment = len(comment)
+    data.append([post, comment, satisfaction])
 
-columns = ['contents', 'label']
+print(max_post, max_comment)
+
+columns = ['post_contents', 'comment_contents', 'label']
 df = pd.DataFrame(data, columns=columns)
 
 # data split (train & test sets)
@@ -272,6 +266,9 @@ train_sample_df = train_sample_df.sample(frac=1)
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
                                           do_lower_case=True)
 
+print(train_sample_df.post_contents.values[0])
+print(train_sample_df.comment_contents.values[0])
+
 # 이렇게 하면 한 document에 대해 input_ids가 문장 단위로 쪼개져서 나옴.
 '''
 result = tokenizer.batch_encode_plus(
@@ -286,60 +283,67 @@ result = tokenizer.batch_encode_plus(
 '''
 
 
-def conduct_input_ids_and_attention_masks(str_values, score_values):
-    input_ids_list = []
-    attention_masks_list = []
-    sentence_count_list = []
+def conduct_input_ids_and_attention_masks(str_values, score_values, max_sentences_list):
+    tensor_datasets = []
+    pc_input_ids = []
+    pc_attention_masks = []
+    pc_sentence_count = []
 
-    for contents in str_values:
-        result = tokenizer.batch_encode_plus(
-            contents,
-            add_special_tokens=True,
-            return_attention_mask=True,
-            pad_to_max_length=True,
-            max_length=512,
-            return_tensors='pt'
-        )
+    for value, max_sentences in zip(str_values, max_sentences_list):
+        input_ids_list = []
+        attention_masks_list = []
+        sentence_count_list = []
+        for contents in value:
+            result = tokenizer(contents,
+                            pad_to_max_length=True, truncation=True, max_length=128, return_tensors='pt')
 
-        input_ids = result['input_ids']
-        attention_masks = result['attention_mask']
+            input_ids = result['input_ids']
+            attention_masks = result['attention_mask']
 
-        sentence_count_list.append(len(input_ids))
+            sentence_count_list.append(len(input_ids))
 
-        # add zero pads to make all tensors' dimension (34, 512)
-        pad = (0, 0, 0, max_sentences-len(input_ids))
-        input_ids = nn.functional.pad(input_ids, pad, "constant", 0)  # effectively zero padding
-        attention_masks = nn.functional.pad(attention_masks, pad, "constant", 0)
+            # add zero pads to make all tensors' dimension (max_sentences, 128)
+            pad = (0, 0, 0, max_sentences-len(input_ids))
+            input_ids = nn.functional.pad(input_ids, pad, "constant", 0)  # effectively zero padding
+            attention_masks = nn.functional.pad(attention_masks, pad, "constant", 0)
 
-        input_ids_list.append(input_ids)
-        attention_masks_list.append(attention_masks)
+            input_ids_list.append(input_ids)
+            attention_masks_list.append(attention_masks)
 
-    input_ids = torch.stack(input_ids_list, dim=0)
-    attention_masks = torch.stack(attention_masks_list, dim=0)
-    sentence_counts = torch.tensor(sentence_count_list)
+        input_ids = torch.stack(input_ids_list, dim=0)
+        attention_masks = torch.stack(attention_masks_list, dim=0)
+        sentence_counts = torch.tensor(sentence_count_list)
+
+        pc_input_ids.append(input_ids)
+        pc_attention_masks.append(attention_masks)
+        pc_sentence_count.append(sentence_counts)
+
+        print(input_ids.shape, attention_masks.shape, sentence_counts.shape)
+
     labels = torch.tensor(score_values.astype(int))
 
-    print(input_ids.shape, attention_masks.shape, labels.shape, sentence_counts.shape)
-
-    return TensorDataset(input_ids, attention_masks, sentence_counts, labels)
-
-
-dataset_train = conduct_input_ids_and_attention_masks(train_sample_df.contents.values,
-                                                      train_sample_df.label.values)
-
-dataset_val = conduct_input_ids_and_attention_masks(val_df.contents.values,
-                                                    val_df.label.values)
+    # 0: posts / 1: comments
+    return TensorDataset(pc_input_ids[0], pc_input_ids[1],
+                         pc_attention_masks[0], pc_attention_masks[1],
+                         pc_sentence_count[0], pc_sentence_count[1], labels)
 
 
-model = SplitBertModel.from_pretrained('bert-base-uncased', num_labels=len(labels))
-for param in model.bert.parameters():
+dataset_train = conduct_input_ids_and_attention_masks([train_sample_df.post_contents.values, train_sample_df.comment_contents.values],
+                                                      train_sample_df.label.values, [max_post, max_comment])
+
+dataset_val = conduct_input_ids_and_attention_masks([val_df.post_contents.values, val_df.comment_contents.values],
+                                                    val_df.label.values, [max_post, max_comment])
+
+
+model = SplitBertModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2', num_labels=len(labels))
+for param in model.sbert.parameters():
     param.requires_grad = False
 
 optimizer = AdamW(model.parameters(),
-                  lr=2e-3,
+                  lr=2e-4,
                   eps=1e-8)
 
-epochs = 5
+epochs = 20
 batch_size = 4
 
 dataloader_train = DataLoader(dataset_train,
@@ -389,11 +393,14 @@ def evaluate(dataloader_val):
 
     for batch in dataloader_val:
         batch = tuple(b.to(device) for b in batch)
-        one_hot_labels = torch.nn.functional.one_hot(batch[3], num_classes=len(labels))
+        one_hot_labels = torch.nn.functional.one_hot(batch[6], num_classes=len(labels))
 
-        inputs = {'input_ids': batch[0],
-                  'attention_mask': batch[1],
-                  'sentence_count': batch[2],
+        inputs = {'post_input_ids': batch[0],
+                  'comment_input_ids': batch[1],
+                  'post_attention_mask': batch[2],
+                  'comment_attention_mask': batch[3],
+                  'post_sentence_count': batch[4],
+                  'comment_sentence_count': batch[5],
                   'labels': one_hot_labels.type(torch.float)
                   }
 
@@ -406,7 +413,7 @@ def evaluate(dataloader_val):
         logits = logits.detach().cpu().numpy()
         # print(outputs[2])
 
-        label_ids = batch[3].cpu().numpy()
+        label_ids = batch[6].cpu().numpy()
 
         predictions.append(logits)
         true_vals.append(label_ids)
@@ -436,12 +443,15 @@ for epoch in tqdm(range(1, epochs + 1)):
     for batch in progress_bar:
         model.zero_grad()
         batch = tuple(b.to(device) for b in batch)
-        one_hot_labels = torch.nn.functional.one_hot(batch[3], num_classes=len(labels))
+        one_hot_labels = torch.nn.functional.one_hot(batch[6], num_classes=len(labels))
 
-        inputs = {'input_ids': batch[0],
-                  'attention_mask': batch[1],
-                  'sentence_count': batch[2],
-                  'labels': one_hot_labels.type(torch.float),
+        inputs = {'post_input_ids': batch[0],
+                  'comment_input_ids': batch[1],
+                  'post_attention_mask': batch[2],
+                  'comment_attention_mask': batch[3],
+                  'post_sentence_count': batch[4],
+                  'comment_sentence_count': batch[5],
+                  'labels': one_hot_labels.type(torch.float)
                   }
 
         # check parameters are training
