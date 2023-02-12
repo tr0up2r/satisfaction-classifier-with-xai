@@ -472,6 +472,8 @@ for epoch in tqdm(range(1, epochs + 1)):
     val_loss, embeddings, predictions, true_vals, true_scores = evaluate(dataloader_validation)
 
     embeddings = embeddings.tolist()
+    embeddings_df = pd.DataFrame(embeddings)
+    embeddings_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/splitbert_classifier/epoch_{epoch}_embeddings.csv')
     preds_flat = np.argmax(predictions, axis=1).flatten()
     labels_flat = true_vals.flatten()
     scores_flat = true_scores.flatten()
