@@ -92,7 +92,8 @@ class SplitBertModel(BertPreTrainedModel):
             comment_attention_mask: Optional[torch.tensor] = None,
             post_sentence_count: Optional[torch.tensor] = None,
             comment_sentence_count: Optional[torch.tensor] = None,
-            labels: Optional[torch.tensor] = None
+            labels: Optional[torch.tensor] = None,
+            indexes: Optional[torch.tensor] = None
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
         current_batch_size = len(post_input_ids)
@@ -220,18 +221,20 @@ data = []
 
 max_post = 0
 max_comment = 0
+i = 0
 for post, comment, satisfaction, satisfaction_float in zip(post_sequences, comment_sequences,
                                                            satisfactions, satisfactions_float):
     if len(post) > max_post:
         max_post = len(post)
     if len(comment) > max_comment:
         max_comment = len(comment)
-    data.append([post, comment, satisfaction, satisfaction_float])
+    data.append([i, post, comment, satisfaction, satisfaction_float])
+    i += 1
 
 # max_post_sentences: 29, max_comment_sentences: 10
 print(max_post, max_comment)
 
-columns = ['post_contents', 'comment_contents', 'label', 'score']
+columns = ['index', 'post_contents', 'comment_contents', 'label', 'score']
 df = pd.DataFrame(data, columns=columns)
 
 # data split (train & test sets)
@@ -262,7 +265,7 @@ print(train_sample_df.post_contents.values[0])
 print(train_sample_df.comment_contents.values[0])
 
 
-def conduct_input_ids_and_attention_masks(str_values, label_values, score_values, max_sentences_list):
+def conduct_input_ids_and_attention_masks(str_values, label_values, score_values, index_values, max_sentences_list):
     tensor_datasets = []
     pc_input_ids = []
     pc_attention_masks = []
@@ -301,20 +304,22 @@ def conduct_input_ids_and_attention_masks(str_values, label_values, score_values
 
     labels = torch.tensor(label_values.astype(int))
     scores = torch.tensor(score_values.astype(float))
+    indexes = torch.tensor(index_values.astype(int))
 
     # 0: posts / 1: comments
     return TensorDataset(pc_input_ids[0], pc_input_ids[1],
                          pc_attention_masks[0], pc_attention_masks[1],
-                         pc_sentence_count[0], pc_sentence_count[1], labels, scores)
+                         pc_sentence_count[0], pc_sentence_count[1], labels, scores, indexes)
 
 
 dataset_train = conduct_input_ids_and_attention_masks([train_sample_df.post_contents.values,
                                                        train_sample_df.comment_contents.values],
                                                       train_sample_df.label.values, train_sample_df.score.values,
-                                                      [max_post, max_comment])
+                                                      train_sample_df.index.values, [max_post, max_comment])
 
 dataset_val = conduct_input_ids_and_attention_masks([val_df.post_contents.values, val_df.comment_contents.values],
-                                                    val_df.label.values, val_df.score.values, [max_post, max_comment])
+                                                    val_df.label.values, val_df.score.values, val_df.index.values,
+                                                    [max_post, max_comment])
 
 
 model = SplitBertModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2', num_labels=len(labels))
@@ -371,7 +376,7 @@ def evaluate(dataloader_val):
     model.eval()
     loss_val_total = 0
 
-    embeddings, predictions, true_vals, true_scores = [], [], [], []
+    embeddings, predictions, true_vals, true_scores, indexes = [], [], [], [], []
 
     for batch in dataloader_val:
         batch = tuple(b.to(device) for b in batch)
@@ -383,7 +388,8 @@ def evaluate(dataloader_val):
                   'comment_attention_mask': batch[3],
                   'post_sentence_count': batch[4],
                   'comment_sentence_count': batch[5],
-                  'labels': one_hot_labels.type(torch.float)
+                  'labels': one_hot_labels.type(torch.float),
+                  'indexes': batch[7]
                   }
 
         with torch.no_grad():
@@ -398,11 +404,13 @@ def evaluate(dataloader_val):
         logits = logits.detach().cpu().numpy()
         label_ids = batch[6].cpu().numpy()
         score_ids = batch[7].cpu().numpy()
+        index_ids = batch[8].cpu().numpy()
 
         embeddings.append(hidden_states)
         predictions.append(logits)
         true_vals.append(label_ids)
         true_scores.append(score_ids)
+        indexes.append(index_ids)
 
     loss_val_avg = loss_val_total / len(dataloader_val)
 
@@ -410,10 +418,11 @@ def evaluate(dataloader_val):
     predictions = np.concatenate(predictions, axis=0)
     true_vals = np.concatenate(true_vals, axis=0)
     true_scores = np.concatenate(true_scores, axis=0)
+    indexes = np.concatenate(indexes, axis=0)
 
     accuracy_per_class(predictions, true_vals)
 
-    return loss_val_avg, embeddings, predictions, true_vals, true_scores
+    return loss_val_avg, embeddings, predictions, true_vals, true_scores, indexes
 
 
 model.to(device)
@@ -437,7 +446,8 @@ for epoch in tqdm(range(1, epochs + 1)):
                   'comment_attention_mask': batch[3],
                   'post_sentence_count': batch[4],
                   'comment_sentence_count': batch[5],
-                  'labels': one_hot_labels.type(torch.float)
+                  'labels': one_hot_labels.type(torch.float),
+                  'indexes': batch[7]
                   }
 
         # check parameters are training
@@ -469,7 +479,7 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'\nEpoch {epoch}')
     loss_train_avg = loss_train_total / len(dataloader_train)
     tqdm.write(f'Training loss: {loss_train_avg}')
-    val_loss, embeddings, predictions, true_vals, true_scores = evaluate(dataloader_validation)
+    val_loss, embeddings, predictions, true_vals, true_scores, indexes = evaluate(dataloader_validation)
 
     embeddings = embeddings.tolist()
     embeddings_df = pd.DataFrame(embeddings)
@@ -477,17 +487,18 @@ for epoch in tqdm(range(1, epochs + 1)):
     preds_flat = np.argmax(predictions, axis=1).flatten()
     labels_flat = true_vals.flatten()
     scores_flat = true_scores.flatten()
-    print(type(embeddings))
+    indexes_flat = indexes.flatten()
+    # print(type(embeddings))
 
     val_f1_macro, val_f1_micro = f1_score_func(predictions, true_vals)
     tqdm.write(f'Validation loss: {val_loss}')
     tqdm.write(f'F1 Score (Macro, Micro): {val_f1_macro}, {val_f1_micro}')
     training_result.append([epoch, loss_train_avg, val_loss, val_f1_macro, val_f1_micro])
 
-    print(len(embeddings), len(preds_flat), len(labels_flat), len(scores_flat))
+    print(len(embeddings), len(preds_flat), len(labels_flat), len(scores_flat), len(indexes_flat))
 
-    tsne_df = pd.DataFrame({'embedding': embeddings, 'prediction': preds_flat,
-                            'label': labels_flat, 'score': scores_flat})
+    tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat,
+                            'score': scores_flat, 'index': indexes_flat})
     tsne_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/splitbert_classifier/epoch_{epoch}_result_for_tsne.csv')
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
