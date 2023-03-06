@@ -23,7 +23,7 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModel
 from sklearn.metrics import r2_score
 
-# maximum sentence count (post + comment pair): 34
+
 max_sentences = 34
 max_post = 29
 max_comment = 10
@@ -60,11 +60,6 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-pe = PositionalEncoding(embedding_size, max_len=34)
-x = torch.FloatTensor(max_sentences, 1, embedding_size).long()
-x = pe(x)
-
-
 class SplitBertModel(BertPreTrainedModel):
 
     def __init__(self, config):
@@ -80,11 +75,11 @@ class SplitBertModel(BertPreTrainedModel):
         self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=1)
         self.pe = PositionalEncoding(embedding_size, max_len=max_sentences)
 
-        self.dropout = nn.Dropout(0.2)
-        self.relu = nn.ReLU()
-        self.classifier1 = nn.Linear(embedding_size, embedding_size//2)
-        self.classifier2 = nn.Linear(embedding_size//2, config.num_labels)
-        self.classifier3 = nn.Linear(embedding_size, config.num_labels)
+        # self.dropout = nn.Dropout(0.2)
+        # self.relu = nn.ReLU()
+        # self.classifier1 = nn.Linear(embedding_size, embedding_size//2)
+        # self.classifier2 = nn.Linear(embedding_size//2, config.num_labels)
+        # self.classifier3 = nn.Linear(embedding_size, config.num_labels)
         self.post_init()
 
     def forward(
@@ -171,15 +166,19 @@ class SplitBertModel(BertPreTrainedModel):
 
             outputs[i] = decoder_output
 
-        results = self.classifier1(outputs)
-        logits = self.classifier2(results)
+        # results = self.classifier1(outputs)
+        # logits = self.classifier2(results)
         # loss_fct = nn.CrossEntropyLoss()
         # loss = loss_fct(logits.squeeze(), labels.squeeze())
 
-        return modeling_outputs.SequenceClassifierOutput(
+        return outputs
+
+        '''
+         return modeling_outputs.SequenceClassifierOutput(
             logits=logits,
             hidden_states=outputs
         )
+        '''
 
 
 class ContrastiveLearner(nn.Module):
@@ -211,11 +210,11 @@ class ContrastiveLearner(nn.Module):
                    'comment_sentence_count': comment_sentence_count2,
                    'labels': labels2}
 
-        outputs1 = self.splitbert(**inputs1)
-        outputs2 = self.splitbert(**inputs2)
+        hidden_states1 = self.splitbert(**inputs1)
+        hidden_states2 = self.splitbert(**inputs2)
 
-        hidden_states1 = outputs1['hidden_states']
-        hidden_states2 = outputs2['hidden_states']
+        # hidden_states1 = outputs1['hidden_states']
+        # hidden_states2 = outputs2['hidden_states']
         difference = torch.sub(hidden_states1, hidden_states2)
 
         # print(difference)
@@ -230,22 +229,6 @@ class ContrastiveLearner(nn.Module):
         # print(loss.item())
 
         return (loss, logits)
-
-
-# prepare dataset
-nlp = English()
-nlp.add_pipe("sentencizer")
-
-# for linux
-df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_train_50.csv',
-                       encoding='UTF-8')
-test_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_test_remain.csv',
-                      encoding='UTF-8')
-
-# for windows
-# df = pd.read_csv('csv/df_for_contrastive_learner_mini.csv', encoding='UTF-8')
-print(df.columns)
-print(test_df.columns)
 
 
 def make_train_test_df(df):
@@ -291,23 +274,6 @@ def make_train_test_df(df):
     df = pd.DataFrame(data, columns=columns)
 
     return df
-
-'''
-# data split (train & test sets)
-idx_train, idx_val = train_test_split(df.index.values, test_size=0.20, random_state=42)
-
-train_df = df.iloc[idx_train]
-val_df = df.iloc[idx_val]
-'''
-
-train_df = make_train_test_df(df)
-val_df = make_train_test_df(test_df)
-
-print(train_df.shape)
-print(val_df.shape)
-
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
-                                          do_lower_case=True)
 
 
 def conduct_input_ids_and_attention_masks(str_values, label_values1, label_values2, diff_values,
@@ -361,45 +327,6 @@ def conduct_input_ids_and_attention_masks(str_values, label_values1, label_value
                          labels1, labels2, diffs, indexes1, indexes2)
 
 
-dataset_train = conduct_input_ids_and_attention_masks([train_df.post_contents1.values,
-                                                       train_df.comment_contents1.values,
-                                                       train_df.post_contents2.values,
-                                                       train_df.comment_contents2.values,],
-                                                      train_df.label1.values, train_df.label2.values,
-                                                      train_df.difference.values, train_df.index1.values,
-                                                      train_df.index2.values, [max_post, max_comment] * 2)
-
-dataset_val = conduct_input_ids_and_attention_masks([val_df.post_contents1.values, val_df.comment_contents1.values,
-                                                     val_df.post_contents2.values, val_df.comment_contents2.values,],
-                                                    val_df.label1.values, val_df.label2.values,
-                                                    val_df.difference.values, val_df.index1.values,
-                                                    val_df.index2.values, [max_post, max_comment] * 2)
-
-# model = SplitBertModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2', num_labels=num_labels)
-model = ContrastiveLearner()
-for param in model.splitbert.sbert.parameters():
-    param.requires_grad = False
-
-optimizer = AdamW(model.parameters(),
-                  lr=2e-4,
-                  eps=1e-8)
-
-epochs = 10
-batch_size = 4
-
-dataloader_train = DataLoader(dataset_train,
-                              sampler=RandomSampler(dataset_train),
-                              batch_size=batch_size)
-
-dataloader_validation = DataLoader(dataset_val,
-                                   sampler=SequentialSampler(dataset_val),
-                                   batch_size=batch_size)
-
-scheduler = get_linear_schedule_with_warmup(optimizer,
-                                            num_warmup_steps=0,
-                                            num_training_steps=len(dataloader_train) * epochs)
-
-
 def f1_score_func(preds, labels):
     preds_flat = np.argmax(preds, axis=1).flatten()
     labels_flat = labels.flatten()
@@ -415,15 +342,6 @@ def accuracy_per_class(preds, labels):
         y_true = labels_flat[labels_flat == label]
         print(f'Class {label} : ', end='')
         print(f'{len(y_preds[y_preds == label])}/{len(y_true)}')
-
-
-# Training Loop
-device = torch.device('cuda')
-seed_val = 17
-random.seed(seed_val)
-np.random.seed(seed_val)
-torch.manual_seed(seed_val)
-torch.cuda.manual_seed_all(seed_val)
 
 
 def evaluate(dataloader_val):
@@ -482,92 +400,183 @@ def evaluate(dataloader_val):
     return loss_val_avg, predictions, true_vals
 
 
-model.to(device)
+if __name__ == '__main__':
+    print('Running!')
+    # maximum sentence count (post + comment pair): 34
 
-training_result = []
+    pe = PositionalEncoding(embedding_size, max_len=34)
+    x = torch.FloatTensor(max_sentences, 1, embedding_size).long()
+    x = pe(x)
 
-for epoch in tqdm(range(1, epochs + 1)):
-    result_for_tsne = []
-    model.train()
-    loss_train_total = 0
-    progress_bar = tqdm(dataloader_train, desc='Epoch {:1d}'.format(epoch), leave=False, disable=False)
-    i = 0
-    for batch in progress_bar:
-        model.zero_grad()
-        batch = tuple(b.to(device) for b in batch)
-        one_hot_labels1 = torch.nn.functional.one_hot(batch[12], num_classes=num_labels)
-        one_hot_labels2 = torch.nn.functional.one_hot(batch[13], num_classes=num_labels)
+    # prepare dataset
+    nlp = English()
+    nlp.add_pipe("sentencizer")
 
-        inputs = {'post_input_ids1': batch[0],
-                  'comment_input_ids1': batch[1],
-                  'post_input_ids2': batch[2],
-                  'comment_input_ids2': batch[3],
-                  'post_attention_mask1': batch[4],
-                  'comment_attention_mask1': batch[5],
-                  'post_attention_mask2': batch[6],
-                  'comment_attention_mask2': batch[7],
-                  'post_sentence_count1': batch[8],
-                  'comment_sentence_count1': batch[9],
-                  'post_sentence_count2': batch[10],
-                  'comment_sentence_count2': batch[11],
-                  'labels1': one_hot_labels1.type(torch.float),
-                  'labels2': one_hot_labels2.type(torch.float),
-                  'diffs': batch[14],
-                  'indexes1': batch[15],
-                  'indexes2': batch[16]
-                  }
+    # for linux
+    df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_train_mini.csv',
+                     encoding='UTF-8')
+    test_df = pd.read_csv(
+        '../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_test_mini.csv',
+        encoding='UTF-8')
 
-        # check parameters are training
-        '''
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                print(name, param.requires_grad)
-        '''
+    # for windows
+    # df = pd.read_csv('csv/df_for_contrastive_learner_mini.csv', encoding='UTF-8')
+    print(df.columns)
+    print(test_df.columns)
 
-        outputs = model(**inputs)
-        loss = outputs[0]
-        logits = outputs[1]
-        logits = logits.detach().cpu().numpy()
-        predictions = np.concatenate([logits], axis=0)
+    '''
+    # data split (train & test sets)
+    idx_train, idx_val = train_test_split(df.index.values, test_size=0.20, random_state=42)
 
-        # 총 loss 계산.
-        loss_train_total += loss.item()
-        loss.backward()
-        # print(loss.requires_grad)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        # gradient를 이용해 weight update.
-        optimizer.step()
-        # scheduler를 이용해 learning rate 조절.
-        scheduler.step()
-        progress_bar.set_postfix({'training_loss': '{:.3f}'.format(loss.item() / len(batch))})
-        i += 1
-    # torch.save(model.state_dict(),
-    #            f'../predicting-satisfaction-using-graphs/model/splitbert_classifier/epoch_{epoch}.model')
-    tqdm.write(f'\nEpoch {epoch}')
-    loss_train_avg = loss_train_total / len(dataloader_train)
-    tqdm.write(f'Training loss: {loss_train_avg}')
-    val_loss, predictions, true_vals = evaluate(dataloader_validation)
-    preds_flat = predictions.flatten()
-    # print(preds_flat)
-    labels_flat = true_vals.flatten()
-    # print(labels_flat)
-    # print(type(embeddings))
+    train_df = df.iloc[idx_train]
+    val_df = df.iloc[idx_val]
+    '''
 
-    # val_f1_macro, val_f1_micro = f1_score_func(predictions, true_vals)
-    tqdm.write(f'Validation loss: {val_loss}')
-    tqdm.write(f'R^2 Score: {r2_score(labels_flat, preds_flat)}')
-    training_result.append([epoch, loss_train_avg, val_loss, r2_score(labels_flat, preds_flat)])
+    train_df = make_train_test_df(df)
+    val_df = make_train_test_df(test_df)
 
-    tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat})
-    tsne_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/contrastive_learner/epoch_{epoch}_result.csv')
+    print(train_df.shape)
+    print(val_df.shape)
 
-fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
+                                              do_lower_case=True)
 
-with open(
-        f'../predicting-satisfaction-using-graphs/csv/contrastive_learner/training_result.csv',
-        'w', newline='') as f:
-    # using csv.writer method from CSV package
-    write = csv.writer(f)
+    dataset_train = conduct_input_ids_and_attention_masks([train_df.post_contents1.values,
+                                                           train_df.comment_contents1.values,
+                                                           train_df.post_contents2.values,
+                                                           train_df.comment_contents2.values, ],
+                                                          train_df.label1.values, train_df.label2.values,
+                                                          train_df.difference.values, train_df.index1.values,
+                                                          train_df.index2.values, [max_post, max_comment] * 2)
 
-    write.writerow(fields)
-    write.writerows(training_result)
+    dataset_val = conduct_input_ids_and_attention_masks([val_df.post_contents1.values, val_df.comment_contents1.values,
+                                                         val_df.post_contents2.values,
+                                                         val_df.comment_contents2.values, ],
+                                                        val_df.label1.values, val_df.label2.values,
+                                                        val_df.difference.values, val_df.index1.values,
+                                                        val_df.index2.values, [max_post, max_comment] * 2)
+
+    # model = SplitBertModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2', num_labels=num_labels)
+    model = ContrastiveLearner()
+    for param in model.splitbert.sbert.parameters():
+        param.requires_grad = False
+
+    optimizer = AdamW(model.parameters(),
+                      lr=2e-4,
+                      eps=1e-8)
+
+    epochs = 10
+    batch_size = 4
+
+    dataloader_train = DataLoader(dataset_train,
+                                  sampler=RandomSampler(dataset_train),
+                                  batch_size=batch_size)
+
+    dataloader_validation = DataLoader(dataset_val,
+                                       sampler=SequentialSampler(dataset_val),
+                                       batch_size=batch_size)
+
+    scheduler = get_linear_schedule_with_warmup(optimizer,
+                                                num_warmup_steps=0,
+                                                num_training_steps=len(dataloader_train) * epochs)
+
+    # Training Loop
+    device = torch.device('cuda')
+    seed_val = 17
+    random.seed(seed_val)
+    np.random.seed(seed_val)
+    torch.manual_seed(seed_val)
+    torch.cuda.manual_seed_all(seed_val)
+
+    model.to(device)
+
+    training_result = []
+
+    for epoch in tqdm(range(1, epochs + 1)):
+        result_for_tsne = []
+        model.train()
+        loss_train_total = 0
+        progress_bar = tqdm(dataloader_train, desc='Epoch {:1d}'.format(epoch), leave=False, disable=False)
+        i = 0
+        for batch in progress_bar:
+            model.zero_grad()
+            batch = tuple(b.to(device) for b in batch)
+            one_hot_labels1 = torch.nn.functional.one_hot(batch[12], num_classes=num_labels)
+            one_hot_labels2 = torch.nn.functional.one_hot(batch[13], num_classes=num_labels)
+
+            inputs = {'post_input_ids1': batch[0],
+                      'comment_input_ids1': batch[1],
+                      'post_input_ids2': batch[2],
+                      'comment_input_ids2': batch[3],
+                      'post_attention_mask1': batch[4],
+                      'comment_attention_mask1': batch[5],
+                      'post_attention_mask2': batch[6],
+                      'comment_attention_mask2': batch[7],
+                      'post_sentence_count1': batch[8],
+                      'comment_sentence_count1': batch[9],
+                      'post_sentence_count2': batch[10],
+                      'comment_sentence_count2': batch[11],
+                      'labels1': one_hot_labels1.type(torch.float),
+                      'labels2': one_hot_labels2.type(torch.float),
+                      'diffs': batch[14],
+                      'indexes1': batch[15],
+                      'indexes2': batch[16]
+                      }
+
+            # check parameters are training
+            '''
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    print(name, param.requires_grad)
+            '''
+
+            outputs = model(**inputs)
+            loss = outputs[0]
+            logits = outputs[1]
+            logits = logits.detach().cpu().numpy()
+            predictions = np.concatenate([logits], axis=0)
+
+            # 총 loss 계산.
+            loss_train_total += loss.item()
+            loss.backward()
+            # print(loss.requires_grad)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            # gradient를 이용해 weight update.
+            optimizer.step()
+            # scheduler를 이용해 learning rate 조절.
+            scheduler.step()
+            progress_bar.set_postfix({'training_loss': '{:.3f}'.format(loss.item() / len(batch))})
+            i += 1
+        # torch.save(model.state_dict(),
+        #            f'../predicting-satisfaction-using-graphs/model/splitbert_classifier/epoch_{epoch}.model')
+        tqdm.write(f'\nEpoch {epoch}')
+        loss_train_avg = loss_train_total / len(dataloader_train)
+        tqdm.write(f'Training loss: {loss_train_avg}')
+        val_loss, predictions, true_vals = evaluate(dataloader_validation)
+        preds_flat = predictions.flatten()
+        # print(preds_flat)
+        labels_flat = true_vals.flatten()
+        # print(labels_flat)
+        # print(type(embeddings))
+
+        # val_f1_macro, val_f1_micro = f1_score_func(predictions, true_vals)
+        tqdm.write(f'Validation loss: {val_loss}')
+        tqdm.write(f'R^2 Score: {r2_score(labels_flat, preds_flat)}')
+        training_result.append([epoch, loss_train_avg, val_loss, r2_score(labels_flat, preds_flat)])
+
+        tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat})
+        tsne_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/contrastive_learner/epoch_{epoch}_result.csv')
+        print(model.splitbert.state_dict())
+        torch.save(model.splitbert.state_dict(),
+                   f'../predicting-satisfaction-using-graphs/model/contrastive_learner/epoch_{epoch}_model.pt')
+
+    fields = ['epoch', 'training_loss', 'validation_loss', 'r^2_score']
+
+    with open(
+            f'../predicting-satisfaction-using-graphs/csv/contrastive_learner/training_result.csv',
+            'w', newline='') as f:
+        # using csv.writer method from CSV package
+        write = csv.writer(f)
+
+        write.writerow(fields)
+        write.writerows(training_result)
