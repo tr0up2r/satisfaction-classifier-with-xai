@@ -8,10 +8,8 @@ import torch.nn as nn
 from tqdm import tqdm
 from transformers import BertTokenizer
 from torch.utils.data import TensorDataset
-from transformers import BertModel
 from transformers import BertPreTrainedModel
 
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import AdamW, get_linear_schedule_with_warmup
 from transformers import modeling_outputs
@@ -19,8 +17,7 @@ from typing import Optional, Tuple, Union
 from sklearn.metrics import f1_score
 
 from spacy.lang.en import English
-from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoModel
 from sklearn.metrics import r2_score
 
 
@@ -90,6 +87,7 @@ class SplitBertModel(BertPreTrainedModel):
             comment_attention_mask: Optional[torch.tensor] = None,
             post_sentence_count: Optional[torch.tensor] = None,
             comment_sentence_count: Optional[torch.tensor] = None,
+            prediction_mode: Optional[torch.tensor] = None,
             labels: Optional[torch.tensor] = None,
             indexes: Optional[torch.tensor] = None
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
@@ -103,16 +101,16 @@ class SplitBertModel(BertPreTrainedModel):
         def get_batch_embeddings(input_ids, attention_mask, sentence_count, max_sentences, batch_embeddings):
             for i in range(len(input_ids)):
                 sbert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to('cuda')
+                count = sentence_count[i].item()
+                model_output = self.sbert(input_ids[i][0:count],
+                                          attention_mask=attention_mask[i][0:count])
 
-                model_output = self.sbert(input_ids[i][0:sentence_count[i]],
-                                          attention_mask=attention_mask[i][0:sentence_count[i]])
+                model_output = mean_pooling(model_output, attention_mask[i][0:count])
 
-                model_output = mean_pooling(model_output, attention_mask[i][0:sentence_count[i]])
-
-                for j in range(sentence_count[i].item()):
+                for j in range(count):
                     sbert_outputs[j] = model_output[j]
 
-                for j in range(sentence_count[i].item(), max_sentences):
+                for j in range(count, max_sentences):
                     sbert_outputs[j] = torch.zeros(1, embedding_size).to('cuda')
 
                 # nn.Linear
@@ -413,10 +411,10 @@ if __name__ == '__main__':
     nlp.add_pipe("sentencizer")
 
     # for linux
-    df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_train_mini.csv',
+    df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_train_50.csv',
                      encoding='UTF-8')
     test_df = pd.read_csv(
-        '../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_test_mini.csv',
+        '../predicting-satisfaction-using-graphs/csv/dataset/df_for_contrastive_learner_test_remain.csv',
         encoding='UTF-8')
 
     # for windows
