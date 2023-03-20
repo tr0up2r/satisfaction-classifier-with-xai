@@ -1,24 +1,11 @@
 import pandas as pd
-import numpy as np
-import random
-import csv
 import torch
 import torch.nn as nn
 
-from tqdm import tqdm
 from transformers import BertTokenizer
 from torch.utils.data import TensorDataset
-from transformers import BertPreTrainedModel
-
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import AdamW, get_linear_schedule_with_warmup
-from transformers import modeling_outputs
-from typing import Optional, Tuple, Union
-from sklearn.metrics import f1_score
 
 from spacy.lang.en import English
-from transformers import AutoModel
-from sklearn.metrics import r2_score
 from contrastive_learning_with_splitberts_testset import SplitBertModel
 
 device = torch.device('cuda')
@@ -39,7 +26,8 @@ class SplitbertPredictiveModel(nn.Module):
                 post_sentence_count, comment_sentence_count):
 
         self.splitbert.load_state_dict(
-            torch.load('../predicting-satisfaction-using-graphs/model/contrastive_learner/epoch_10_model.pt'))
+            torch.load(
+                '../predicting-satisfaction-using-graphs/model/contrastive_learner/classification/epoch_10_model.pt'))
         self.splitbert.to(device)
 
         inputs = {'post_input_ids': post_input_ids,
