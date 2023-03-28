@@ -20,8 +20,8 @@ from sklearn.metrics import f1_score
 
 import csv
 
-
-data_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/avg_satisfaction_raw_0-999.csv', encoding='ISO-8859-1')
+path = '/data1/mykim/predicting-satisfaction-using-graphs'
+data_df = pd.read_csv(path + '/csv/dataset/avg_satisfaction_raw_0-999.csv', encoding='ISO-8859-1')
 reply_contents = list(data_df['replyContent'])
 satisfactions_float = list(data_df['satisfy_composite'])
 satisfactions = []
@@ -306,14 +306,14 @@ for epoch in tqdm(range(1, epochs + 1)):
     tqdm.write(f'F1 Score (Macro, Micro): {val_f1_macro}, {val_f1_micro}')
 
     pred_df = pd.DataFrame(predictions)
-    pred_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/reply_classifier/epoch_{epoch}_predicted_vals.csv')
+    pred_df.to_csv(path + f'/csv/reply_classifier/epoch_{epoch}_predicted_vals.csv')
 
     training_result.append([epoch, loss_train_avg, val_loss, val_f1_macro, val_f1_micro])
 
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 
-with open(f'../predicting-satisfaction-using-graphs/csv/reply_classifier/training_result.csv', 'w', newline='') as f:
+with open(path + '/csv/reply_classifier/training_result.csv', 'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
 
@@ -321,4 +321,4 @@ with open(f'../predicting-satisfaction-using-graphs/csv/reply_classifier/trainin
     write.writerows(training_result)
 
 true_df = pd.DataFrame(true_vals)
-true_df.to_csv(f'../predicting-satisfaction-using-graphs/csv//true_vals.csv')
+true_df.to_csv(path + '/csv/true_vals.csv')

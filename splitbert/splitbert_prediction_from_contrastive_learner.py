@@ -11,6 +11,7 @@ from contrastive_learning_with_splitberts_testset import SplitBertModel
 device = torch.device('cuda')
 num_labels = 1
 embedding_size = 384
+path = '/data1/mykim/predicting-satisfaction-using-graphs'
 
 
 class SplitbertPredictiveModel(nn.Module):
@@ -27,7 +28,7 @@ class SplitbertPredictiveModel(nn.Module):
 
         self.splitbert.load_state_dict(
             torch.load(
-                '../predicting-satisfaction-using-graphs/model/contrastive_learner/classification/epoch_10_model.pt'))
+                path + '/model/contrastive_learner/classification/epoch_10_model.pt'))
         self.splitbert.to(device)
 
         inputs = {'post_input_ids': post_input_ids,
@@ -57,8 +58,8 @@ nlp = English()
 nlp.add_pipe("sentencizer")
 
 # for linux
-post_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/liwc_post.csv', encoding='UTF-8')
-comment_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/liwc_comment.csv', encoding='UTF-8')
+post_df = pd.read_csv(path + '/csv/dataset/liwc_post.csv', encoding='UTF-8')
+comment_df = pd.read_csv(path + '/csv/dataset/liwc_comment.csv', encoding='UTF-8')
 
 print(post_df.shape)
 

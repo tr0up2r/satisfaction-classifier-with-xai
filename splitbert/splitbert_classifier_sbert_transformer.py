@@ -22,6 +22,7 @@ from spacy.lang.en import English
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModel
 
+path = '/data1/mykim/predicting-satisfaction-using-graphs'
 
 # Mean Pooling - Take attention mask into account for correct averaging
 def mean_pooling(model_output, attention_mask):
@@ -184,8 +185,8 @@ nlp = English()
 nlp.add_pipe("sentencizer")
 
 # for linux
-post_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/liwc_post.csv', encoding='UTF-8')
-comment_df = pd.read_csv('../predicting-satisfaction-using-graphs/csv/dataset/liwc_comment.csv', encoding='UTF-8')
+post_df = pd.read_csv(path + '/csv/dataset/liwc_post.csv', encoding='UTF-8')
+comment_df = pd.read_csv(path + '/csv/dataset/liwc_comment.csv', encoding='UTF-8')
 
 # for windows
 # post_df = pd.read_csv('csv/liwc_post.csv', encoding='UTF-8')
@@ -483,7 +484,7 @@ for epoch in tqdm(range(1, epochs + 1)):
 
     embeddings = embeddings.tolist()
     embeddings_df = pd.DataFrame(embeddings)
-    embeddings_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/splitbert_classifier/epoch_{epoch}_embeddings.csv')
+    embeddings_df.to_csv(path + f'/csv/splitbert_classifier/epoch_{epoch}_embeddings.csv')
     preds_flat = np.argmax(predictions, axis=1).flatten()
     labels_flat = true_vals.flatten()
     scores_flat = true_scores.flatten()
@@ -499,12 +500,12 @@ for epoch in tqdm(range(1, epochs + 1)):
 
     tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat,
                             'score': scores_flat, 'index': indexes_flat})
-    tsne_df.to_csv(f'../predicting-satisfaction-using-graphs/csv/splitbert_classifier/epoch_{epoch}_result_for_tsne.csv')
+    tsne_df.to_csv(path + f'/csv/splitbert_classifier/epoch_{epoch}_result_for_tsne.csv')
 
 fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 
 with open(
-        f'../predicting-satisfaction-using-graphs/csv/splitbert_classifier/training_result.csv',
+        path + '/csv/splitbert_classifier/training_result.csv',
         'w', newline='') as f:
     # using csv.writer method from CSV package
     write = csv.writer(f)
