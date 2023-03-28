@@ -95,12 +95,14 @@ if __name__ == "__main__":
     dataset_train = conduct_input_ids_and_attention_masks(tokenizer, [train_sample_df.post_contents.values,
                                                                       train_sample_df.comment_contents.values],
                                                           train_sample_df.label.values, train_sample_df.score.values,
-                                                          train_sample_df.index.values, [max_post, max_comment])
+                                                          train_sample_df.index.values, [max_post, max_comment],
+                                                          'post_comment')
 
     dataset_val = conduct_input_ids_and_attention_masks(tokenizer, [val_df.post_contents.values,
                                                                     val_df.comment_contents.values],
                                                         val_df.label.values, val_df.score.values,
-                                                        val_df.index.values, [max_post, max_comment])
+                                                        val_df.index.values, [max_post, max_comment],
+                                                        'post_comment')
 
     model = SplitBertTransformerModel(num_labels=len(labels), embedding_size=384, max_sentences=34,
                                       max_len1=max_post, max_len2=max_comment)

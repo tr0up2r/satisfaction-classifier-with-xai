@@ -172,27 +172,26 @@ class SplitBertTransformerModel(nn.Module):
         return (loss, logits, outputs)
 
 
-class SplitBertEncoderModel(BertPreTrainedModel):
+class SplitBertEncoderModel(nn.Module):
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        self.config = config
-        self.embedding_size = config.embedding_size
-        self.max_sentences = config.max_sentences
+    def __init__(self, num_labels, embedding_size, max_len):
+        super().__init__()
+        self.num_labels = num_labels
+        self.embedding_size = embedding_size
+        self.max_len = max_len
 
         self.sbert = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
         self.fc_layer = nn.Linear(self.embedding_size, self.embedding_size)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.embedding_size, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-        self.pe = PositionalEncoding(self.embedding_size, max_len=self.max_sentences)
+        self.pe = PositionalEncoding(self.embedding_size, max_len=self.max_len)
 
         self.dropout = nn.Dropout(0.2)
         self.relu = nn.ReLU()
         self.classifier1 = nn.Linear(self.embedding_size, self.embedding_size//2)
-        self.classifier2 = nn.Linear(self.embedding_size//2, config.num_labels)
-        self.classifier3 = nn.Linear(self.embedding_size, config.num_labels)
-        self.post_init()
+        self.classifier2 = nn.Linear(self.embedding_size//2, self.num_labels)
+        self.classifier3 = nn.Linear(self.embedding_size, self.num_labels)
+        # self.post_init()
 
     def forward(
             self,
@@ -204,13 +203,13 @@ class SplitBertEncoderModel(BertPreTrainedModel):
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
         current_batch_size = len(input_ids)
-        batch_embeddings = torch.empty(size=(current_batch_size, 1, self.max_sentences, self.embedding_size),
+        batch_embeddings = torch.empty(size=(current_batch_size, 1, self.max_len, self.embedding_size),
                                        requires_grad=True).to('cuda')
 
-        batch_embeddings = get_batch_embeddings(self.sbert, self.embedding_size, input_ids, attention_mask,
-                                                sentence_count, self.max_sentences, batch_embeddings)
+        batch_embeddings = get_batch_embeddings(self.sbert, self.fc_layer, self.embedding_size, input_ids,
+                                                attention_mask, sentence_count, self.max_len, batch_embeddings)
 
-        outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
+        encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
 
         for embeddings, count, i in zip(batch_embeddings, sentence_count, range(current_batch_size)):
             embeddings = embeddings.swapaxes(0, 1)
@@ -219,33 +218,36 @@ class SplitBertEncoderModel(BertPreTrainedModel):
             embeddings = self.pe(embeddings)
 
             # make masks
-            src_mask, src_key_padding_mask = make_masks(self.max_sentences, count)
+            src_mask, src_key_padding_mask = make_masks(self.max_len, count)
 
-            output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
-            print(output.shape)
+            encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
 
-            # decoder_output = torch.mean(decoder_output[:c_count], dim=0).squeeze(0)
+            # mean
+            encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
 
-            # outputs[i] = decoder_output
+            # last output
+            # encoder_output = encoder_output[count-1].squeeze(0)
 
-        outputs = self.classifier1(outputs)
-        logits = self.classifier2(outputs)
+            encoder_outputs[i] = encoder_output
+
+        encoder_outputs = self.classifier1(encoder_outputs)
+        logits = self.classifier2(encoder_outputs)
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(logits.squeeze(), labels.squeeze())
 
         return modeling_outputs.SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs
+            hidden_states=encoder_outputs
         )
 
 
 def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, score_values, index_values,
-                                          max_sentences_list):
+                                          max_sentences_list, target):
     tensor_datasets = []
-    pc_input_ids = []
-    pc_attention_masks = []
-    pc_sentence_count = []
+    total_input_ids = []
+    total_attention_masks = []
+    total_sentence_count = []
 
     for value, max_sentences in zip(str_values, max_sentences_list):
         input_ids_list = []
@@ -272,9 +274,9 @@ def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, s
         attention_masks = torch.stack(attention_masks_list, dim=0)
         sentence_counts = torch.tensor(sentence_count_list)
 
-        pc_input_ids.append(input_ids)
-        pc_attention_masks.append(attention_masks)
-        pc_sentence_count.append(sentence_counts)
+        total_input_ids.append(input_ids)
+        total_attention_masks.append(attention_masks)
+        total_sentence_count.append(sentence_counts)
 
         print(input_ids.shape, attention_masks.shape, sentence_counts.shape)
 
@@ -283,9 +285,13 @@ def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, s
     indexes = torch.tensor(index_values.astype(int))
 
     # 0: posts / 1: comments
-    return TensorDataset(labels, pc_input_ids[0], pc_input_ids[1],
-                         pc_attention_masks[0], pc_attention_masks[1],
-                         pc_sentence_count[0], pc_sentence_count[1], scores, indexes)
+    if target == 'post_comment':
+        return TensorDataset(labels, total_input_ids[0], total_input_ids[1],
+                             total_attention_masks[0], total_attention_masks[1],
+                             total_sentence_count[0], total_sentence_count[1], scores, indexes)
+    else:  # reply
+        return TensorDataset(labels, total_input_ids[0], total_attention_masks[0], total_sentence_count[0],
+                             scores, indexes)
 
 
 def f1_score_func(preds, labels):
@@ -313,7 +319,6 @@ def evaluate(dataloader_val, model, device, target, labels):
 
     for batch in dataloader_val:
         batch = tuple(b.to(device) for b in batch)
-        print(batch[0], len(labels))
         one_hot_labels = torch.nn.functional.one_hot(batch[0], num_classes=len(labels))
 
         if target == 'post_comment':
@@ -323,8 +328,7 @@ def evaluate(dataloader_val, model, device, target, labels):
                       'attention_mask1': batch[3],
                       'attention_mask2': batch[4],
                       'sentence_count1': batch[5],
-                      'sentence_count2': batch[6],
-                      'indexes': batch[7]
+                      'sentence_count2': batch[6]
                       }
         else:
             inputs = {'labels': one_hot_labels.type(torch.float),
@@ -345,8 +349,13 @@ def evaluate(dataloader_val, model, device, target, labels):
         hidden_states = hidden_states.detach().cpu().numpy()
         logits = logits.detach().cpu().numpy()
         label_ids = batch[0].cpu().numpy()
-        score_ids = batch[7].cpu().numpy()
-        index_ids = batch[8].cpu().numpy()
+
+        if target == 'post_comment':
+            score_ids = batch[7].cpu().numpy()
+            index_ids = batch[8].cpu().numpy()
+        else:  # reply
+            score_ids = batch[4].cpu().numpy()
+            index_ids = batch[5].cpu().numpy()
 
         embeddings.append(hidden_states)
         predictions.append(logits)
@@ -361,8 +370,6 @@ def evaluate(dataloader_val, model, device, target, labels):
     true_vals = np.concatenate(true_vals, axis=0)
     true_scores = np.concatenate(true_scores, axis=0)
     indexes = np.concatenate(indexes, axis=0)
-
-    print(true_vals)
 
     accuracy_per_class(predictions, true_vals)
 
@@ -459,7 +466,7 @@ def train(model, device, dataset_train, dataset_val, labels, target, path):
 
         embeddings = embeddings.tolist()
         embeddings_df = pd.DataFrame(embeddings)
-        embeddings_df.to_csv(path + f'/csv/splitbert_classifier/epoch_{epoch}_embeddings.csv')
+        embeddings_df.to_csv(path + f'/csv/splitbert_classifier/{target}/epoch_{epoch}_embeddings.csv')
         preds_flat = np.argmax(predictions, axis=1).flatten()
         labels_flat = true_vals.flatten()
         scores_flat = true_scores.flatten()
@@ -471,16 +478,14 @@ def train(model, device, dataset_train, dataset_val, labels, target, path):
         tqdm.write(f'F1 Score (Macro, Micro): {val_f1_macro}, {val_f1_micro}')
         training_result.append([epoch, loss_train_avg, val_loss, val_f1_macro, val_f1_micro])
 
-        print(len(embeddings), len(preds_flat), len(labels_flat), len(scores_flat), len(indexes_flat))
-
         tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat,
                                 'score': scores_flat, 'index': indexes_flat})
-        tsne_df.to_csv(path + f'/csv/splitbert_classifier/epoch_{epoch}_result_for_tsne.csv')
+        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/epoch_{epoch}_result_for_tsne.csv')
 
     fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 
     with open(
-            path + '/csv/splitbert_classifier/training_result.csv',
+            path + f'/csv/splitbert_classifier/{target}/training_result.csv',
             'w', newline='') as f:
         # using csv.writer method from CSV package
         write = csv.writer(f)
