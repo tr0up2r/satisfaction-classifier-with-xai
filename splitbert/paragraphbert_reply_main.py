@@ -1,5 +1,6 @@
 import pandas as pd
 from spacy.lang.en import English
+from collections import Counter
 from transformers import BertTokenizer
 import torch
 
@@ -7,6 +8,7 @@ from splitbert import train_test_split
 from splitbert import conduct_input_ids_and_attention_masks
 from splitbert import SplitBertEncoderModel
 from splitbert import train
+from textsplit import text_segmentation
 
 
 if __name__ == "__main__":
@@ -33,9 +35,12 @@ if __name__ == "__main__":
             satisfactions.append(2)
 
     reply_sequences = []
+    # print(post_contents[0])
 
     for reply in reply_contents:
-        reply_sequences.append(list(map(lambda x: str(x), list(nlp(reply).sents))))
+        reply_sentences = list(map(lambda x: str(x), list(nlp(reply).sents)))
+        reply_sequences.append(text_segmentation(reply_sentences))
+    print(f'Reply paragraphs count: {Counter(list(map(len, reply_sequences))).most_common()}')
 
     data = []
     max_reply = 0
@@ -49,7 +54,6 @@ if __name__ == "__main__":
     # max_reply: 10
     print(max_reply)
     print(sum(map(len, reply_sequences)) / len(reply_sequences))
-    exit()
 
     columns = ['index', 'reply_contents', 'label', 'score']
     df = pd.DataFrame(data, columns=columns)
@@ -89,6 +93,8 @@ if __name__ == "__main__":
                                                         val_df.label.values, val_df.score.values,
                                                         val_df.index.values, [max_reply], 'reply')
 
+    print(dataset_train[0])
+
     model = SplitBertEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_reply)
 
     device = torch.device('cuda')
@@ -97,4 +103,4 @@ if __name__ == "__main__":
     for param in model.sbert.parameters():
         param.requires_grad = False
 
-    train(model, device, dataset_train, dataset_val, labels, 'reply', path)
+    train(model, device, dataset_train, dataset_val, labels, 'reply_paragraph', path)

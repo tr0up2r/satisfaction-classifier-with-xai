@@ -1,5 +1,6 @@
 import pandas as pd
 from spacy.lang.en import English
+from collections import Counter
 from transformers import BertTokenizer
 import torch
 
@@ -7,6 +8,7 @@ from splitbert import train_test_split
 from splitbert import conduct_input_ids_and_attention_masks
 from splitbert import SplitBertEncoderModel
 from splitbert import train
+from textsplit import text_segmentation
 
 
 if __name__ == "__main__":
@@ -15,9 +17,13 @@ if __name__ == "__main__":
     nlp.add_pipe("sentencizer")
 
     # for linux
+    post_df = pd.read_csv(path + '/csv/dataset/liwc_post.csv', encoding='UTF-8')
+    comment_df = pd.read_csv(path + '/csv/dataset/liwc_comment.csv', encoding='UTF-8')
     reply_df = pd.read_csv(path + '/csv/dataset/avg_satisfaction_raw_0-999.csv', encoding='ISO-8859-1')
 
     # texts (x)
+    post_contents = list(post_df['content'])
+    comment_bodies = list(comment_df['content'])
     reply_contents = list(reply_df['replyContent'])
 
     # satisfaction score (y)
@@ -32,10 +38,49 @@ if __name__ == "__main__":
         else:
             satisfactions.append(2)
 
+    post_sequences = []
+    comment_sequences = []
     reply_sequences = []
+    # print(post_contents[0])
 
-    for reply in reply_contents:
-        reply_sequences.append(list(map(lambda x: str(x), list(nlp(reply).sents))))
+    for post_content, comment_body, reply in zip(post_contents, comment_bodies, reply_contents):
+        post_sentences = list(map(lambda x: str(x), list(nlp(post_content).sents)))
+        post_sequences.append(text_segmentation(post_sentences))
+
+        comment_sentences = list(map(lambda x: str(x), list(nlp(comment_body).sents)))
+        comment_sequences.append(text_segmentation(comment_sentences))
+
+        reply_sentences = list(map(lambda x: str(x), list(nlp(reply).sents)))
+        reply_sequences.append(text_segmentation(reply_sentences))
+
+    print(f'Post paragraphs count: {Counter(list(map(len, post_sequences))).most_common()}')
+    print(f'Comment paragraphs count: {Counter(list(map(len, comment_sequences))).most_common()}')
+    print(f'Reply paragraphs count: {Counter(list(map(len, reply_sequences))).most_common()}')
+    exit()
+
+    pair_count = []
+    for i in range(1000):
+        print('post')
+        for j in range(len(post_sequences[i])):
+            print(post_sequences[i][j])
+            print('--------')
+        print('============')
+        print('comment')
+        for j in range(len(comment_sequences[i])):
+            print(comment_sequences[i][j])
+            print('--------')
+        print('============')
+        print('reply')
+        for j in range(len(reply_sequences[i])):
+            print(reply_sequences[i][j])
+            print('--------')
+        print('============')
+        print()
+        pair_count.append(len(post_sequences[i]) * len(comment_sequences[i]) * len(reply_sequences[i]))
+    print(f'Triplet pair count: {Counter(pair_count).most_common()}')
+
+
+    exit()
 
     data = []
     max_reply = 0
