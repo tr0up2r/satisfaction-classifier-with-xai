@@ -29,17 +29,17 @@ def activate_similarities(similarities: np.array, p_size=10) -> np.array:
     return activated_similarities
 
 
-def text_segmentation(sentences, order=2):
-    if len(sentences) < 5:
-        return []
+def text_segmentation(sentences, order=1):
+    if len(sentences) < 3:
+        return [' '.join(sentences)]
     embeddings = model.encode(sentences)
     similarities = cosine_similarity(embeddings)
-    activated_similarities = activate_similarities(similarities, p_size=5)
+    activated_similarities = activate_similarities(similarities, p_size=3)
     minmimas = argrelextrema(activated_similarities, np.less, order=order)
 
     split_points = [each for each in minmimas[0]]
     if not split_points:
-        return []
+        return [' '.join(sentences)]
 
     result = []
     text = ''

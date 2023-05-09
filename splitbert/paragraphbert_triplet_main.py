@@ -6,6 +6,7 @@ import torch
 
 from splitbert import train_test_split
 from splitbert import conduct_input_ids_and_attention_masks
+from splitbert import SplitBertConcatEncoderModel
 from splitbert import SplitBertEncoderModel
 from splitbert import train
 from textsplit import text_segmentation
@@ -53,51 +54,28 @@ if __name__ == "__main__":
         reply_sentences = list(map(lambda x: str(x), list(nlp(reply).sents)))
         reply_sequences.append(text_segmentation(reply_sentences))
 
-    print(f'Post paragraphs count: {Counter(list(map(len, post_sequences))).most_common()}')
-    print(f'Comment paragraphs count: {Counter(list(map(len, comment_sequences))).most_common()}')
-    print(f'Reply paragraphs count: {Counter(list(map(len, reply_sequences))).most_common()}')
-    # exit()
-
-    pair_count = []
-    for i in range(1000):
-        print('post')
-        for j in range(len(post_sequences[i])):
-            print(post_sequences[i][j])
-            print('--------')
-        print('============')
-        print('comment')
-        for j in range(len(comment_sequences[i])):
-            print(comment_sequences[i][j])
-            print('--------')
-        print('============')
-        print('reply')
-        print(reply_sequences[i])
-        for j in range(len(reply_sequences[i])):
-            print(reply_sequences[i][j])
-            print('--------')
-        print('============')
-        print()
-        pair_count.append(len(post_sequences[i]) * len(comment_sequences[i]) * len(reply_sequences[i]))
-    print(f'Triplet pair count: {Counter(pair_count).most_common()}')
-
-
-    exit()
-
     data = []
-    max_reply = 0
+    max_post, max_comment, max_reply = 10, 0, 0
     i = 0
-    for reply, satisfaction, satisfaction_float in zip(reply_sequences, satisfactions, satisfactions_float):
+    for post, comment, reply, satisfaction, satisfaction_float in zip(post_sequences, comment_sequences,
+                                                                      reply_sequences, satisfactions,
+                                                                      satisfactions_float):
+        if len(post) > max_post:
+            max_post = len(post)
+        if len(comment) > max_comment:
+            max_comment = len(comment)
         if len(reply) > max_reply:
             max_reply = len(reply)
-        data.append([i, reply, satisfaction, satisfaction_float])
+
+        data.append([i, post, comment, reply, satisfaction, satisfaction_float])
         i += 1
 
-    # max_reply: 10
-    print(max_reply)
-    print(sum(map(len, reply_sequences)) / len(reply_sequences))
-    exit()
+    # max post / comment / reply: 10 / 4 / 4
+    # but, all 10
+    max_comment, max_reply = max_post, max_post
+    print(max_post, max_comment, max_reply)
 
-    columns = ['index', 'reply_contents', 'label', 'score']
+    columns = ['index', 'post_contents', 'comment_contents', 'reply_contents', 'label', 'score']
     df = pd.DataFrame(data, columns=columns)
 
     # data split (train & test sets)
@@ -127,15 +105,23 @@ if __name__ == "__main__":
     print(train_sample_df.reply_contents.values[0])
     print(train_sample_df.shape)
 
-    dataset_train = conduct_input_ids_and_attention_masks(tokenizer, [train_sample_df.reply_contents.values],
+    dataset_train = conduct_input_ids_and_attention_masks(tokenizer, [train_sample_df.post_contents.values,
+                                                                      train_sample_df.comment_contents.values,
+                                                                      train_sample_df.reply_contents.values],
                                                           train_sample_df.label.values, train_sample_df.score.values,
-                                                          train_sample_df.index.values, [max_reply], 'reply')
+                                                          train_sample_df.index.values,
+                                                          [max_post, max_comment, max_reply], 'triplet')
 
-    dataset_val = conduct_input_ids_and_attention_masks(tokenizer, [val_df.reply_contents.values],
+    dataset_val = conduct_input_ids_and_attention_masks(tokenizer, [val_df.post_contents.values,
+                                                                    val_df.comment_contents.values,
+                                                                    val_df.reply_contents.values],
                                                         val_df.label.values, val_df.score.values,
-                                                        val_df.index.values, [max_reply], 'reply')
+                                                        val_df.index.values, [max_post, max_comment, max_reply],
+                                                        'triplet')
 
-    model = SplitBertEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_reply)
+    print(dataset_val[0])
+
+    model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_post)
 
     device = torch.device('cuda')
     model.to(device)
@@ -143,4 +129,4 @@ if __name__ == "__main__":
     for param in model.sbert.parameters():
         param.requires_grad = False
 
-    train(model, device, dataset_train, dataset_val, labels, 'reply', path)
+    train(model, device, dataset_train, dataset_val, labels, 'triplet', path)

@@ -242,6 +242,93 @@ class SplitBertEncoderModel(nn.Module):
         )
 
 
+class SplitBertConcatEncoderModel(nn.Module):
+
+    def __init__(self, num_labels, embedding_size, max_len):
+        super().__init__()
+        self.num_labels = num_labels
+        self.embedding_size = embedding_size
+        self.max_len = max_len
+
+        self.sbert = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+        self.fc_layer = nn.Linear(self.embedding_size, self.embedding_size)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.embedding_size, nhead=8)
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.pe = PositionalEncoding(self.embedding_size, max_len=self.max_len)
+
+        self.dropout = nn.Dropout(0.2)
+        self.relu = nn.ReLU()
+        self.classifier1 = nn.Linear(self.embedding_size*3, self.embedding_size)
+        self.classifier2 = nn.Linear(self.embedding_size, self.num_labels)
+        # self.classifier3 = nn.Linear(self.embedding_size, self.num_labels)
+        # self.post_init()
+
+    def forward(
+            self,
+            labels: Optional[torch.tensor] = None,
+            input_ids1: Optional[torch.tensor] = None,
+            input_ids2: Optional[torch.tensor] = None,
+            input_ids3: Optional[torch.tensor] = None,
+            attention_mask1: Optional[torch.tensor] = None,
+            attention_mask2: Optional[torch.tensor] = None,
+            attention_mask3: Optional[torch.tensor] = None,
+            sentence_count1: Optional[torch.tensor] = None,
+            sentence_count2: Optional[torch.tensor] = None,
+            sentence_count3: Optional[torch.tensor] = None
+    ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
+
+        input_ids_list = [input_ids1, input_ids2, input_ids3]
+        attention_mask_list = [attention_mask1, attention_mask2, attention_mask3]
+        sentence_count_list = [sentence_count1, sentence_count2, sentence_count3]
+
+        current_batch_size = len(input_ids1)
+
+        now = 0
+        for input_ids, attention_mask, sentence_count in zip(input_ids_list, attention_mask_list, sentence_count_list):
+            batch_embeddings = torch.empty(size=(current_batch_size, 1, self.max_len, self.embedding_size),
+                                           requires_grad=True).to('cuda')
+
+            batch_embeddings = get_batch_embeddings(self.sbert, self.fc_layer, self.embedding_size, input_ids,
+                                                    attention_mask, sentence_count, self.max_len, batch_embeddings)
+
+            encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
+
+            for embeddings, count, i in zip(batch_embeddings, sentence_count, range(current_batch_size)):
+                embeddings = embeddings.swapaxes(0, 1)
+
+                # add positional encoding
+                embeddings = self.pe(embeddings)
+
+                # make masks
+                src_mask, src_key_padding_mask = make_masks(self.max_len, count)
+
+                encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+
+                # mean
+                encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
+
+                # last output
+                # encoder_output = encoder_output[count-1].squeeze(0)
+
+                encoder_outputs[i] = encoder_output
+            if now == 0:
+                result_outputs = encoder_outputs
+            else:
+                result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
+            now += 1
+
+        result_outputs = self.classifier1(result_outputs)
+        logits = self.classifier2(result_outputs)
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(logits.squeeze(), labels.squeeze())
+
+        return modeling_outputs.SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=encoder_outputs
+        )
+
+
 def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, score_values, index_values,
                                           max_sentences_list, target):
     tensor_datasets = []
@@ -289,9 +376,14 @@ def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, s
         return TensorDataset(labels, total_input_ids[0], total_input_ids[1],
                              total_attention_masks[0], total_attention_masks[1],
                              total_sentence_count[0], total_sentence_count[1], scores, indexes)
-    else:  # reply
+    elif target == 'reply':
         return TensorDataset(labels, total_input_ids[0], total_attention_masks[0], total_sentence_count[0],
                              scores, indexes)
+    # 0: posts / 1: comments / 2: reply
+    else:  # triple
+        return TensorDataset(labels, total_input_ids[0], total_input_ids[1], total_input_ids[2],
+                             total_attention_masks[0], total_attention_masks[1], total_attention_masks[2],
+                             total_sentence_count[0], total_sentence_count[1], total_sentence_count[2], scores, indexes)
 
 
 def f1_score_func(preds, labels):
@@ -330,12 +422,24 @@ def evaluate(dataloader_val, model, device, target, labels):
                       'sentence_count1': batch[5],
                       'sentence_count2': batch[6]
                       }
-        else:
+        elif target == 'reply':
             inputs = {'labels': one_hot_labels.type(torch.float),
                       'input_ids': batch[1],
                       'attention_mask': batch[2],
                       'sentence_count': batch[3],
                       'indexes': batch[4]
+                      }
+        else:
+            inputs = {'labels': one_hot_labels.type(torch.float),
+                      'input_ids1': batch[1],
+                      'input_ids2': batch[2],
+                      'input_ids3': batch[3],
+                      'attention_mask1': batch[4],
+                      'attention_mask2': batch[5],
+                      'attention_mask3': batch[6],
+                      'sentence_count1': batch[7],
+                      'sentence_count2': batch[8],
+                      'sentence_count3': batch[9]
                       }
 
         with torch.no_grad():
@@ -353,9 +457,12 @@ def evaluate(dataloader_val, model, device, target, labels):
         if target == 'post_comment':
             score_ids = batch[7].cpu().numpy()
             index_ids = batch[8].cpu().numpy()
-        else:  # reply
+        elif target == 'reply':
             score_ids = batch[4].cpu().numpy()
             index_ids = batch[5].cpu().numpy()
+        else:
+            score_ids = batch[10].cpu().numpy()
+            index_ids = batch[11].cpu().numpy()
 
         embeddings.append(hidden_states)
         predictions.append(logits)
@@ -424,12 +531,24 @@ def train(model, device, dataset_train, dataset_val, labels, target, path):
                           'sentence_count2': batch[6],
                           'indexes': batch[7]
                           }
-            else:
+            elif target == 'reply':
                 inputs = {'labels': one_hot_labels.type(torch.float),
                           'input_ids': batch[1],
                           'attention_mask': batch[2],
                           'sentence_count': batch[3],
                           'indexes': batch[4]
+                          }
+            else:
+                inputs = {'labels': one_hot_labels.type(torch.float),
+                          'input_ids1': batch[1],
+                          'input_ids2': batch[2],
+                          'input_ids3': batch[3],
+                          'attention_mask1': batch[4],
+                          'attention_mask2': batch[5],
+                          'attention_mask3': batch[6],
+                          'sentence_count1': batch[7],
+                          'sentence_count2': batch[8],
+                          'sentence_count3': batch[9]
                           }
 
             # check parameters are training
