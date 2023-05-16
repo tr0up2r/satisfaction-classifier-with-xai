@@ -50,26 +50,30 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-def get_batch_embeddings(model, fc_layer, embedding_size, input_ids, attention_mask, sentence_count,
-                         max_sentences, batch_embeddings):
+def get_batch_embeddings(model, fc_layer, fc_layer_for_pc, embedding_size, input_ids, attention_mask, sentence_count,
+                         max_sentences, batch_embeddings, pc_all):
     for i in range(len(input_ids)):
-        sbert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to('cuda')
+        bert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to('cuda')
 
         model_output = model(input_ids[i][0:sentence_count[i]],
-                                    attention_mask=attention_mask[i][0:sentence_count[i]])
+                             attention_mask=attention_mask[i][0:sentence_count[i]])
 
-        model_output = mean_pooling(model_output, attention_mask[i][0:sentence_count[i]])
+        if pc_all:
+            model_output = model_output.pooler_output
+            model_output = fc_layer_for_pc(model_output)
+        else:
+            model_output = mean_pooling(model_output, attention_mask[i][0:sentence_count[i]])
 
         for j in range(sentence_count[i].item()):
-            sbert_outputs[j] = model_output[j]
+            bert_outputs[j] = model_output[j]
 
         for j in range(sentence_count[i].item(), max_sentences):
-            sbert_outputs[j] = torch.zeros(1, embedding_size).to('cuda')
+            bert_outputs[j] = torch.zeros(1, embedding_size).to('cuda')
 
         # nn.Linear
-        sbert_outputs_fc = fc_layer(sbert_outputs)
-        sbert_outputs_fc = sbert_outputs_fc.swapaxes(0, 1)
-        batch_embeddings[i] = sbert_outputs_fc
+        bert_outputs_fc = fc_layer(bert_outputs)
+        bert_outputs_fc = bert_outputs_fc.swapaxes(0, 1)
+        batch_embeddings[i] = bert_outputs_fc
 
     return batch_embeddings
 
@@ -244,14 +248,17 @@ class SplitBertEncoderModel(nn.Module):
 
 class SplitBertConcatEncoderModel(nn.Module):
 
-    def __init__(self, num_labels, embedding_size, max_len):
+    def __init__(self, num_labels, embedding_size, max_len, pc_segmentation=True):
         super().__init__()
         self.num_labels = num_labels
         self.embedding_size = embedding_size
         self.max_len = max_len
+        self.pc_segmentation = pc_segmentation
 
+        self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.sbert = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
         self.fc_layer = nn.Linear(self.embedding_size, self.embedding_size)
+        self.fc_layer_for_pc = nn.Linear(768, self.embedding_size)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.embedding_size, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
         self.pe = PositionalEncoding(self.embedding_size, max_len=self.max_len)
@@ -280,16 +287,28 @@ class SplitBertConcatEncoderModel(nn.Module):
         input_ids_list = [input_ids1, input_ids2, input_ids3]
         attention_mask_list = [attention_mask1, attention_mask2, attention_mask3]
         sentence_count_list = [sentence_count1, sentence_count2, sentence_count3]
+        target_list = ['post', 'comment', 'reply']
 
         current_batch_size = len(input_ids1)
 
         now = 0
-        for input_ids, attention_mask, sentence_count in zip(input_ids_list, attention_mask_list, sentence_count_list):
+        for input_ids, attention_mask, sentence_count, target in zip(input_ids_list, attention_mask_list,
+                                                                     sentence_count_list, target_list):
+            # print(input_ids.shape)  # (4, 10, 256)
             batch_embeddings = torch.empty(size=(current_batch_size, 1, self.max_len, self.embedding_size),
                                            requires_grad=True).to('cuda')
+            model = self.sbert
+            pc_all = False
+            if not self.pc_segmentation:
+                if target == 'post' or target == 'comment':
+                    model = self.bert
+                    pc_all = True
+                else:
+                    model = self.sbert
 
-            batch_embeddings = get_batch_embeddings(self.sbert, self.fc_layer, self.embedding_size, input_ids,
-                                                    attention_mask, sentence_count, self.max_len, batch_embeddings)
+            batch_embeddings = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
+                                                    self.embedding_size, input_ids, attention_mask,
+                                                    sentence_count, self.max_len, batch_embeddings, pc_all)
 
             encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
 
@@ -330,19 +349,19 @@ class SplitBertConcatEncoderModel(nn.Module):
 
 
 def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, score_values, index_values,
-                                          max_sentences_list, target):
+                                          max_count, target):
     tensor_datasets = []
     total_input_ids = []
     total_attention_masks = []
     total_sentence_count = []
 
-    for value, max_sentences in zip(str_values, max_sentences_list):
+    for value in str_values:
         input_ids_list = []
         attention_masks_list = []
         sentence_count_list = []
         for contents in value:
             result = tokenizer(contents,
-                            pad_to_max_length=True, truncation=True, max_length=128, return_tensors='pt')
+                               pad_to_max_length=True, truncation=True, max_length=256, return_tensors='pt')
 
             input_ids = result['input_ids']
             attention_masks = result['attention_mask']
@@ -350,7 +369,7 @@ def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, s
             sentence_count_list.append(len(input_ids))
 
             # add zero pads to make all tensors' dimension (max_sentences, 128)
-            pad = (0, 0, 0, max_sentences-len(input_ids))
+            pad = (0, 0, 0, max_count-len(input_ids))
             input_ids = nn.functional.pad(input_ids, pad, "constant", 0)  # effectively zero padding
             attention_masks = nn.functional.pad(attention_masks, pad, "constant", 0)
 
@@ -366,6 +385,7 @@ def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, s
         total_sentence_count.append(sentence_counts)
 
         print(input_ids.shape, attention_masks.shape, sentence_counts.shape)
+    print(total_sentence_count)
 
     labels = torch.tensor(label_values.astype(int))
     scores = torch.tensor(score_values.astype(float))
