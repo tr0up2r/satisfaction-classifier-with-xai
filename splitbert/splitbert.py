@@ -4,6 +4,7 @@ import random
 import csv
 import torch
 import torch.nn as nn
+import os
 
 from tqdm import tqdm
 from torch.utils.data import TensorDataset
@@ -19,6 +20,14 @@ from sklearn.metrics import f1_score
 
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModel
+
+
+def create_folder(directory):
+    try:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+    except OSError:
+        print('Error: Creating directory. ' + directory)
 
 
 # Mean Pooling - Take attention mask into account for correct averaging
@@ -51,16 +60,21 @@ class PositionalEncoding(nn.Module):
 
 
 def get_batch_embeddings(model, fc_layer, fc_layer_for_pc, embedding_size, input_ids, attention_mask, sentence_count,
-                         max_sentences, batch_embeddings, pc_all):
+                         max_sentences, batch_embeddings, is_all):
+    if is_all:
+        max_sentences = 1
+
     for i in range(len(input_ids)):
         bert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to('cuda')
+        # print(bert_outputs.shape) 1, 1, 384
 
         model_output = model(input_ids[i][0:sentence_count[i]],
                              attention_mask=attention_mask[i][0:sentence_count[i]])
 
-        if pc_all:
+        if is_all:
             model_output = model_output.pooler_output
             model_output = fc_layer_for_pc(model_output)
+
         else:
             model_output = mean_pooling(model_output, attention_mask[i][0:sentence_count[i]])
 
@@ -281,53 +295,57 @@ class SplitBertConcatEncoderModel(nn.Module):
             attention_mask3: Optional[torch.tensor] = None,
             sentence_count1: Optional[torch.tensor] = None,
             sentence_count2: Optional[torch.tensor] = None,
-            sentence_count3: Optional[torch.tensor] = None
+            sentence_count3: Optional[torch.tensor] = None,
+            mode: Optional[torch.tensor] = None
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
         input_ids_list = [input_ids1, input_ids2, input_ids3]
         attention_mask_list = [attention_mask1, attention_mask2, attention_mask3]
         sentence_count_list = [sentence_count1, sentence_count2, sentence_count3]
-        target_list = ['post', 'comment', 'reply']
+        # target_list = ['post', 'comment', 'reply']
 
         current_batch_size = len(input_ids1)
 
         now = 0
-        for input_ids, attention_mask, sentence_count, target in zip(input_ids_list, attention_mask_list,
-                                                                     sentence_count_list, target_list):
-            # print(input_ids.shape)  # (4, 10, 256)
-            batch_embeddings = torch.empty(size=(current_batch_size, 1, self.max_len, self.embedding_size),
+        for input_ids, attention_mask, sentence_count, now_mode in zip(input_ids_list, attention_mask_list,
+                                                                       sentence_count_list, mode):
+            if now_mode == 'all':
+                model = self.bert
+                is_all = True
+                max_sentence = 1
+            else:
+                model = self.sbert
+                is_all = False
+                max_sentence = self.max_len
+
+            batch_embeddings = torch.empty(size=(current_batch_size, 1, max_sentence, self.embedding_size),
                                            requires_grad=True).to('cuda')
-            model = self.sbert
-            pc_all = False
-            if not self.pc_segmentation:
-                if target == 'post' or target == 'comment':
-                    model = self.bert
-                    pc_all = True
-                else:
-                    model = self.sbert
 
             batch_embeddings = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
                                                     self.embedding_size, input_ids, attention_mask,
-                                                    sentence_count, self.max_len, batch_embeddings, pc_all)
+                                                    sentence_count, self.max_len, batch_embeddings, is_all)
 
             encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
 
             for embeddings, count, i in zip(batch_embeddings, sentence_count, range(current_batch_size)):
                 embeddings = embeddings.swapaxes(0, 1)
 
-                # add positional encoding
-                embeddings = self.pe(embeddings)
+                if is_all:  # no zero padding -> no src mask
+                    encoder_output = self.encoder(embeddings)
+                else:
+                    # add positional encoding
+                    embeddings = self.pe(embeddings)
 
-                # make masks
-                src_mask, src_key_padding_mask = make_masks(self.max_len, count)
+                    # make masks
+                    src_mask, src_key_padding_mask = make_masks(self.max_len, count)
 
-                encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+                    encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
 
-                # mean
-                encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
+                    # mean
+                    encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
 
-                # last output
-                # encoder_output = encoder_output[count-1].squeeze(0)
+                    # last output
+                    # encoder_output = encoder_output[count-1].squeeze(0)
 
                 encoder_outputs[i] = encoder_output
             if now == 0:
@@ -423,7 +441,7 @@ def accuracy_per_class(preds, labels):
         print(f'{len(y_preds[y_preds == label])}/{len(y_true)}')
 
 
-def evaluate(dataloader_val, model, device, target, labels):
+def evaluate(dataloader_val, model, device, target, labels, mode):
     model.eval()
     loss_val_total = 0
 
@@ -459,7 +477,8 @@ def evaluate(dataloader_val, model, device, target, labels):
                       'attention_mask3': batch[6],
                       'sentence_count1': batch[7],
                       'sentence_count2': batch[8],
-                      'sentence_count3': batch[9]
+                      'sentence_count3': batch[9],
+                      'mode': mode
                       }
 
         with torch.no_grad():
@@ -503,7 +522,9 @@ def evaluate(dataloader_val, model, device, target, labels):
     return loss_val_avg, embeddings, predictions, true_vals, true_scores, indexes
 
 
-def train(model, device, dataset_train, dataset_val, labels, target, path):
+def train(model, device, dataset_train, dataset_val, labels, target, path, mode):
+    create_folder(path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}')
+
     optimizer = AdamW(model.parameters(),
                       lr=2e-4,
                       eps=1e-8)
@@ -568,7 +589,8 @@ def train(model, device, dataset_train, dataset_val, labels, target, path):
                           'attention_mask3': batch[6],
                           'sentence_count1': batch[7],
                           'sentence_count2': batch[8],
-                          'sentence_count3': batch[9]
+                          'sentence_count3': batch[9],
+                          'mode': mode
                           }
 
             # check parameters are training
@@ -601,7 +623,7 @@ def train(model, device, dataset_train, dataset_val, labels, target, path):
         loss_train_avg = loss_train_total / len(dataloader_train)
         tqdm.write(f'Training loss: {loss_train_avg}')
         val_loss, embeddings, predictions, true_vals, true_scores, indexes = evaluate(dataloader_validation, model,
-                                                                                      device, target, labels)
+                                                                                      device, target, labels, mode)
 
         embeddings = embeddings.tolist()
         embeddings_df = pd.DataFrame(embeddings)
@@ -619,12 +641,12 @@ def train(model, device, dataset_train, dataset_val, labels, target, path):
 
         tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat,
                                 'score': scores_flat, 'index': indexes_flat})
-        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/epoch_{epoch}_result_for_tsne.csv')
+        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}/epoch_{epoch}_result_for_tsne.csv')
 
     fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 
     with open(
-            path + f'/csv/splitbert_classifier/{target}/training_result.csv',
+            path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}/training_result.csv',
             'w', newline='') as f:
         # using csv.writer method from CSV package
         write = csv.writer(f)
