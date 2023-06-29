@@ -60,12 +60,12 @@ class PositionalEncoding(nn.Module):
 
 
 def get_batch_embeddings(model, fc_layer, fc_layer_for_pc, embedding_size, input_ids, attention_mask, sentence_count,
-                         max_sentences, batch_embeddings, is_all):
+                         max_sentences, batch_embeddings, is_all, device):
     if is_all:
         max_sentences = 1
 
     for i in range(len(input_ids)):
-        bert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to('cuda')
+        bert_outputs = torch.empty(size=(max_sentences, 1, embedding_size)).to(device)
         # print(bert_outputs.shape) 1, 1, 384
 
         model_output = model(input_ids[i][0:sentence_count[i]],
@@ -82,7 +82,7 @@ def get_batch_embeddings(model, fc_layer, fc_layer_for_pc, embedding_size, input
             bert_outputs[j] = model_output[j]
 
         for j in range(sentence_count[i].item(), max_sentences):
-            bert_outputs[j] = torch.zeros(1, embedding_size).to('cuda')
+            bert_outputs[j] = torch.zeros(1, embedding_size).to(device)
 
         # nn.Linear
         bert_outputs_fc = fc_layer(bert_outputs)
@@ -92,12 +92,12 @@ def get_batch_embeddings(model, fc_layer, fc_layer_for_pc, embedding_size, input
     return batch_embeddings
 
 
-def make_masks(max_sentences, count):
+def make_masks(max_sentences, count, device):
     mask = (torch.triu(torch.ones(max_sentences, max_sentences)) == 1).transpose(0, 1)
-    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0)).to('cuda')
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0)).to(device)
 
-    zeros = torch.zeros(1, count.item()).to('cuda')
-    ones = torch.ones(1, max_sentences - count.item()).to('cuda')
+    zeros = torch.zeros(1, count.item()).to(device)
+    ones = torch.ones(1, max_sentences - count.item()).to(device)
     key_padding_mask = torch.cat([zeros, ones], dim=1).type(torch.bool)
 
     return mask, key_padding_mask
@@ -185,7 +185,8 @@ class SplitBertTransformerModel(nn.Module):
         outputs = self.classifier1(outputs)
         logits = self.classifier2(outputs)
         loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(logits.squeeze(), labels.squeeze())
+        # loss = loss_fct(logits.squeeze(), labels.squeeze())
+        loss = loss_fct(logits, labels)
 
         return (loss, logits, outputs)
 
@@ -262,12 +263,13 @@ class SplitBertEncoderModel(nn.Module):
 
 class SplitBertConcatEncoderModel(nn.Module):
 
-    def __init__(self, num_labels, embedding_size, max_len, pc_segmentation=True):
+    def __init__(self, num_labels, embedding_size, max_len, device, pc_segmentation=True):
         super().__init__()
         self.num_labels = num_labels
         self.embedding_size = embedding_size
         self.max_len = max_len
         self.pc_segmentation = pc_segmentation
+        self.device = device
 
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.sbert = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
@@ -306,6 +308,9 @@ class SplitBertConcatEncoderModel(nn.Module):
 
         current_batch_size = len(input_ids1)
 
+        batch_embeddings_list = []
+        encoder_outputs_list = []
+
         now = 0
         for input_ids, attention_mask, sentence_count, now_mode in zip(input_ids_list, attention_mask_list,
                                                                        sentence_count_list, mode):
@@ -319,13 +324,15 @@ class SplitBertConcatEncoderModel(nn.Module):
                 max_sentence = self.max_len
 
             batch_embeddings = torch.empty(size=(current_batch_size, 1, max_sentence, self.embedding_size),
-                                           requires_grad=True).to('cuda')
+                                           requires_grad=True).to(self.device)
 
             batch_embeddings = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
                                                     self.embedding_size, input_ids, attention_mask,
-                                                    sentence_count, self.max_len, batch_embeddings, is_all)
+                                                    sentence_count, self.max_len, batch_embeddings, is_all, self.device)
 
-            encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
+            batch_embeddings_list.append(batch_embeddings)
+
+            encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to(self.device)
 
             for embeddings, count, i in zip(batch_embeddings, sentence_count, range(current_batch_size)):
                 embeddings = embeddings.swapaxes(0, 1)
@@ -337,9 +344,10 @@ class SplitBertConcatEncoderModel(nn.Module):
                     embeddings = self.pe(embeddings)
 
                     # make masks
-                    src_mask, src_key_padding_mask = make_masks(self.max_len, count)
+                    src_mask, src_key_padding_mask = make_masks(self.max_len, count, self.device)
 
                     encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+                    encoder_outputs_list.append(encoder_output.swapaxes(0, 1))
 
                     # mean
                     encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
@@ -354,15 +362,17 @@ class SplitBertConcatEncoderModel(nn.Module):
                 result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
             now += 1
 
-        result_outputs = self.classifier1(result_outputs)
-        logits = self.classifier2(result_outputs)
+        outputs = self.classifier1(result_outputs)
+        logits = self.classifier2(outputs)
         loss_fct = nn.CrossEntropyLoss()
+
         loss = loss_fct(logits.squeeze(), labels.squeeze())
+        # loss = loss_fct(logits, labels)
 
         return modeling_outputs.SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=encoder_outputs
+            hidden_states=encoder_outputs_list
         )
 
 
@@ -489,7 +499,7 @@ def evaluate(dataloader_val, model, device, target, labels, mode):
         hidden_states = outputs[2]
         loss_val_total += loss.item()
 
-        hidden_states = hidden_states.detach().cpu().numpy()
+        # hidden_states = hidden_states.detach().cpu().numpy()
         logits = logits.detach().cpu().numpy()
         label_ids = batch[0].cpu().numpy()
 
@@ -503,7 +513,7 @@ def evaluate(dataloader_val, model, device, target, labels, mode):
             score_ids = batch[10].cpu().numpy()
             index_ids = batch[11].cpu().numpy()
 
-        embeddings.append(hidden_states)
+        # embeddings.append(hidden_states)
         predictions.append(logits)
         true_vals.append(label_ids)
         true_scores.append(score_ids)
@@ -511,7 +521,7 @@ def evaluate(dataloader_val, model, device, target, labels, mode):
 
     loss_val_avg = loss_val_total / len(dataloader_val)
 
-    embeddings = np.concatenate(embeddings, axis=0)
+    # embeddings = np.concatenate(embeddings, axis=0)
     predictions = np.concatenate(predictions, axis=0)
     true_vals = np.concatenate(true_vals, axis=0)
     true_scores = np.concatenate(true_scores, axis=0)
@@ -519,7 +529,7 @@ def evaluate(dataloader_val, model, device, target, labels, mode):
 
     accuracy_per_class(predictions, true_vals)
 
-    return loss_val_avg, embeddings, predictions, true_vals, true_scores, indexes
+    return loss_val_avg, predictions, true_vals, true_scores, indexes
 
 
 def train(model, device, dataset_train, dataset_val, labels, target, path, mode):
@@ -617,17 +627,13 @@ def train(model, device, dataset_train, dataset_val, labels, target, path, mode)
             scheduler.step()
             progress_bar.set_postfix({'training_loss': '{:.3f}'.format(loss.item() / len(batch))})
             i += 1
-        # torch.save(model.state_dict(),
-        #            f'../predicting-satisfaction-using-graphs/model/splitbert_classifier/epoch_{epoch}.model')
+        torch.save(model.state_dict(),
+                   f'/data1/mykim/predicting-satisfaction-using-graphs/splitbert/model/{mode[0]}_{mode[1]}_{mode[2]}/epoch_{epoch}.model')
         tqdm.write(f'\nEpoch {epoch}')
         loss_train_avg = loss_train_total / len(dataloader_train)
         tqdm.write(f'Training loss: {loss_train_avg}')
-        val_loss, embeddings, predictions, true_vals, true_scores, indexes = evaluate(dataloader_validation, model,
+        val_loss, predictions, true_vals, true_scores, indexes = evaluate(dataloader_validation, model,
                                                                                       device, target, labels, mode)
-
-        embeddings = embeddings.tolist()
-        embeddings_df = pd.DataFrame(embeddings)
-        embeddings_df.to_csv(path + f'/csv/splitbert_classifier/{target}/epoch_{epoch}_embeddings.csv')
         preds_flat = np.argmax(predictions, axis=1).flatten()
         labels_flat = true_vals.flatten()
         scores_flat = true_scores.flatten()
@@ -641,7 +647,7 @@ def train(model, device, dataset_train, dataset_val, labels, target, path, mode)
 
         tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat,
                                 'score': scores_flat, 'index': indexes_flat})
-        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}/epoch_{epoch}_result_for_tsne.csv')
+        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}/epoch_{epoch}_result.csv')
 
     fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 

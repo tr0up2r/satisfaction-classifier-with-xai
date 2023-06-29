@@ -16,8 +16,9 @@ from textsplit import text_segmentation
 if __name__ == "__main__":
     path = '/data1/mykim/predicting-satisfaction-using-graphs'
     # [post_mode, comment_mode, reply_mode]
-    items = ['all', 'seg', 'snt']
-    modes = list(map(lambda x: list(x), list(product(items, items, items))))
+    # items = ['all', 'seg', 'snt']
+    # modes = list(map(lambda x: list(x), list(product(items, items, items))))
+    modes = [['seg', 'seg', 'snt']]
     
     nlp = English()
     nlp.add_pipe("sentencizer")
