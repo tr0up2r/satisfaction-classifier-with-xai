@@ -114,30 +114,47 @@ if __name__ == "__main__":
         tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
                                                   do_lower_case=True)
 
-        dataset_train = conduct_input_ids_and_attention_masks(tokenizer, [train_sample_df.post_contents.values,
+        triplet_train = conduct_input_ids_and_attention_masks(tokenizer, [train_sample_df.post_contents.values,
                                                                           train_sample_df.comment_contents.values,
                                                                           train_sample_df.reply_contents.values],
                                                               train_sample_df.label.values,
                                                               train_sample_df.score.values,
                                                               train_sample_df.index.values, max_count, 'triplet')
 
-        dataset_val = conduct_input_ids_and_attention_masks(tokenizer, [val_df.post_contents.values,
+        triplet_val = conduct_input_ids_and_attention_masks(tokenizer, [val_df.post_contents.values,
                                                                         val_df.comment_contents.values,
                                                                         val_df.reply_contents.values],
                                                             val_df.label.values, val_df.score.values,
                                                             val_df.index.values, max_count, 'triplet')
 
+        pc_train = conduct_input_ids_and_attention_masks(tokenizer, [train_sample_df.post_contents.values,
+                                                                     train_sample_df.comment_contents.values],
+                                                         train_sample_df.label.values,
+                                                         train_sample_df.score.values,
+                                                         train_sample_df.index.values, max_count, 'post_comment')
+
+        pc_val = conduct_input_ids_and_attention_masks(tokenizer, [val_df.post_contents.values,
+                                                                   val_df.comment_contents.values],
+                                                       val_df.label.values, val_df.score.values,
+                                                       val_df.index.values, max_count, 'post_comment')
+
         device = torch.device('cuda')
 
-        model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
+        triplet_model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
                                             device=device, target='triplet')
-
-        model.to(device)
-
-        for param in model.sbert.parameters():
+        triplet_model.to(device)
+        for param in triplet_model.sbert.parameters():
             param.requires_grad = False
-
-        for param in model.bert.parameters():
+        for param in triplet_model.bert.parameters():
             param.requires_grad = False
+        train(triplet_model, device, triplet_train, triplet_val, labels, 'triplet', path, ['seg', 'seg', 'snt'])
+        del triplet_model
 
-        train(model, device, dataset_train, dataset_val, labels, 'triplet', path, mode)
+        pc_model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
+                                               device=device, target='post_comment')
+        pc_model.to(device)
+        for param in pc_model.sbert.parameters():
+            param.requires_grad = False
+        for param in pc_model.bert.parameters():
+            param.requires_grad = False
+        train(pc_model, device, pc_train, pc_val, labels, 'post_comment', path, ['seg', 'seg'])

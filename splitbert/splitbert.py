@@ -9,13 +9,11 @@ import os
 from tqdm import tqdm
 from torch.utils.data import TensorDataset
 from transformers import BertModel
-from transformers import BertPreTrainedModel
 
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import AdamW, get_linear_schedule_with_warmup
 from transformers import modeling_outputs
-from typing import Optional, Tuple, Union, Any
+from typing import Optional, Tuple, Union
 from sklearn.metrics import f1_score
 
 from sentence_transformers import SentenceTransformer
@@ -262,13 +260,12 @@ class SplitBertEncoderModel(nn.Module):
 
 
 class SplitBertConcatEncoderModel(nn.Module):
-
-    def __init__(self, num_labels, embedding_size, max_len, device, pc_segmentation=True):
+    def __init__(self, num_labels, embedding_size, max_len, device, target):
         super().__init__()
         self.num_labels = num_labels
         self.embedding_size = embedding_size
         self.max_len = max_len
-        self.pc_segmentation = pc_segmentation
+        self.target = target
         self.device = device
 
         self.bert = BertModel.from_pretrained('bert-base-uncased')
@@ -281,7 +278,8 @@ class SplitBertConcatEncoderModel(nn.Module):
 
         self.dropout = nn.Dropout(0.2)
         self.relu = nn.ReLU()
-        self.classifier1 = nn.Linear(self.embedding_size*3, self.embedding_size)
+
+        self.classifier1 = nn.Linear(self.embedding_size * (2 if target == 'post_comment' else 3), self.embedding_size)
         self.classifier2 = nn.Linear(self.embedding_size, self.num_labels)
         # self.classifier3 = nn.Linear(self.embedding_size, self.num_labels)
         # self.post_init()
@@ -301,10 +299,18 @@ class SplitBertConcatEncoderModel(nn.Module):
             mode: Optional[torch.tensor] = None
     ) -> Union[Tuple[torch.Tensor], modeling_outputs.SequenceClassifierOutput]:
 
-        input_ids_list = [input_ids1, input_ids2, input_ids3]
-        attention_mask_list = [attention_mask1, attention_mask2, attention_mask3]
-        sentence_count_list = [sentence_count1, sentence_count2, sentence_count3]
-        # target_list = ['post', 'comment', 'reply']
+        if input_ids2 is None:
+            input_ids_list = [input_ids1]
+            attention_mask_list = [attention_mask1]
+            sentence_count_list = [sentence_count1]
+        elif input_ids3 is None:
+            input_ids_list = [input_ids1, input_ids2]
+            attention_mask_list = [attention_mask1, attention_mask2]
+            sentence_count_list = [sentence_count1, sentence_count2]
+        else:
+            input_ids_list = [input_ids1, input_ids2, input_ids3]
+            attention_mask_list = [attention_mask1, attention_mask2, attention_mask3]
+            sentence_count_list = [sentence_count1, sentence_count2, sentence_count3]
 
         current_batch_size = len(input_ids1)
 
@@ -362,8 +368,9 @@ class SplitBertConcatEncoderModel(nn.Module):
                 result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
             now += 1
 
-        outputs = self.classifier1(result_outputs)
-        logits = self.classifier2(outputs)
+        if self.target != 'reply':
+            result_outputs = self.classifier1(result_outputs)
+        logits = self.classifier2(result_outputs)
         loss_fct = nn.CrossEntropyLoss()
 
         loss = loss_fct(logits.squeeze(), labels.squeeze())
@@ -434,6 +441,61 @@ def conduct_input_ids_and_attention_masks(tokenizer, str_values, label_values, s
                              total_sentence_count[0], total_sentence_count[1], total_sentence_count[2], scores, indexes)
 
 
+def conduct_input_ids_and_attention_masks_is_es(tokenizer, str_values, label_values, index_values, max_count, target):
+    tensor_datasets = []
+    total_input_ids = []
+    total_attention_masks = []
+    total_sentence_count = []
+
+    for value in str_values:
+        input_ids_list = []
+        attention_masks_list = []
+        sentence_count_list = []
+        for contents in value:
+            result = tokenizer(contents,
+                               pad_to_max_length=True, truncation=True, max_length=256, return_tensors='pt')
+
+            input_ids = result['input_ids']
+            attention_masks = result['attention_mask']
+
+            sentence_count_list.append(len(input_ids))
+
+            # add zero pads to make all tensors' dimension (max_sentences, 128)
+            pad = (0, 0, 0, max_count-len(input_ids))
+            input_ids = nn.functional.pad(input_ids, pad, "constant", 0)  # effectively zero padding
+            attention_masks = nn.functional.pad(attention_masks, pad, "constant", 0)
+
+            input_ids_list.append(input_ids)
+            attention_masks_list.append(attention_masks)
+
+        input_ids = torch.stack(input_ids_list, dim=0)
+        attention_masks = torch.stack(attention_masks_list, dim=0)
+        sentence_counts = torch.tensor(sentence_count_list)
+
+        total_input_ids.append(input_ids)
+        total_attention_masks.append(attention_masks)
+        total_sentence_count.append(sentence_counts)
+
+        print(input_ids.shape, attention_masks.shape, sentence_counts.shape)
+    print(total_sentence_count)
+
+    labels = torch.tensor(label_values.astype(int))
+    indexes = torch.tensor(index_values.astype(int))
+
+    # 0: posts / 1: comments
+    if target == 'post_comment':
+        return TensorDataset(labels, total_input_ids[0], total_input_ids[1],
+                             total_attention_masks[0], total_attention_masks[1],
+                             total_sentence_count[0], total_sentence_count[1], indexes)
+    elif target == 'reply':
+        return TensorDataset(labels, total_input_ids[0], total_attention_masks[0], total_sentence_count[0], indexes)
+    # 0: posts / 1: comments / 2: reply
+    else:  # triple
+        return TensorDataset(labels, total_input_ids[0], total_input_ids[1], total_input_ids[2],
+                             total_attention_masks[0], total_attention_masks[1], total_attention_masks[2],
+                             total_sentence_count[0], total_sentence_count[1], total_sentence_count[2], indexes)
+
+
 def f1_score_func(preds, labels):
     preds_flat = np.argmax(preds, axis=1).flatten()
     labels_flat = labels.flatten()
@@ -468,14 +530,15 @@ def evaluate(dataloader_val, model, device, target, labels, mode):
                       'attention_mask1': batch[3],
                       'attention_mask2': batch[4],
                       'sentence_count1': batch[5],
-                      'sentence_count2': batch[6]
+                      'sentence_count2': batch[6],
+                      'mode': mode
                       }
         elif target == 'reply':
             inputs = {'labels': one_hot_labels.type(torch.float),
-                      'input_ids': batch[1],
-                      'attention_mask': batch[2],
-                      'sentence_count': batch[3],
-                      'indexes': batch[4]
+                      'input_ids1': batch[1],
+                      'attention_mask1': batch[2],
+                      'sentence_count1': batch[3],
+                      'mode': mode
                       }
         else:
             inputs = {'labels': one_hot_labels.type(torch.float),
@@ -533,7 +596,15 @@ def evaluate(dataloader_val, model, device, target, labels, mode):
 
 
 def train(model, device, dataset_train, dataset_val, labels, target, path, mode):
-    create_folder(path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}')
+    if target == 'post_comment':
+        mode_path = f"{mode[0]}_{mode[1]}"
+    elif target == 'reply':
+        mode_path = mode[0]
+    else:
+        mode_path = f"{mode[0]}_{mode[1]}_{mode[2]}"
+
+    create_folder(path + f'/csv/splitbert_classifier/{target}/{mode_path}')
+    create_folder(path + f'/splitbert/model/{mode_path}/')
 
     optimizer = AdamW(model.parameters(),
                       lr=2e-4,
@@ -580,14 +651,14 @@ def train(model, device, dataset_train, dataset_val, labels, target, path, mode)
                           'attention_mask2': batch[4],
                           'sentence_count1': batch[5],
                           'sentence_count2': batch[6],
-                          'indexes': batch[7]
+                          'mode': mode
                           }
             elif target == 'reply':
                 inputs = {'labels': one_hot_labels.type(torch.float),
-                          'input_ids': batch[1],
-                          'attention_mask': batch[2],
-                          'sentence_count': batch[3],
-                          'indexes': batch[4]
+                          'input_ids1': batch[1],
+                          'attention_mask1': batch[2],
+                          'sentence_count1': batch[3],
+                          'mode': mode
                           }
             else:
                 inputs = {'labels': one_hot_labels.type(torch.float),
@@ -628,7 +699,7 @@ def train(model, device, dataset_train, dataset_val, labels, target, path, mode)
             progress_bar.set_postfix({'training_loss': '{:.3f}'.format(loss.item() / len(batch))})
             i += 1
         torch.save(model.state_dict(),
-                   f'/data1/mykim/predicting-satisfaction-using-graphs/splitbert/model/{mode[0]}_{mode[1]}_{mode[2]}/epoch_{epoch}.model')
+                   f'{path}/splitbert/model/{mode_path}/epoch_{epoch}.model')
         tqdm.write(f'\nEpoch {epoch}')
         loss_train_avg = loss_train_total / len(dataloader_train)
         tqdm.write(f'Training loss: {loss_train_avg}')
@@ -647,12 +718,12 @@ def train(model, device, dataset_train, dataset_val, labels, target, path, mode)
 
         tsne_df = pd.DataFrame({'prediction': preds_flat, 'label': labels_flat,
                                 'score': scores_flat, 'index': indexes_flat})
-        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}/epoch_{epoch}_result.csv')
+        tsne_df.to_csv(path + f'/csv/splitbert_classifier/{target}/{mode_path}/epoch_{epoch}_result.csv')
 
     fields = ['epoch', 'training_loss', 'validation_loss', 'f1_score_macro', 'f1_score_micro']
 
     with open(
-            path + f'/csv/splitbert_classifier/{target}/{mode[0]}_{mode[1]}_{mode[2]}/training_result.csv',
+            path + f'/csv/splitbert_classifier/{target}/{mode_path}/training_result.csv',
             'w', newline='') as f:
         # using csv.writer method from CSV package
         write = csv.writer(f)
