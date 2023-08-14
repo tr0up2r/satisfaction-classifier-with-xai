@@ -9,12 +9,14 @@ from splitbert import train_test_split
 from splitbert import conduct_input_ids_and_attention_masks
 from splitbert import SplitBertConcatEncoderModel
 from splitbert import SplitBertEncoderModel
+from splitbert import SplitBertTransformerModel
 from splitbert import train
 from textsplit import text_segmentation
 from collections import Counter
 
 if __name__ == "__main__":
-    path = '/home/mykim/source/predicting-satisfaction-using-graphs'
+    # path = '/home/mykim/source/predicting-satisfaction-using-graphs'  # intelligence
+    path = '/home/mykim/data1/predicting-satisfaction-using-graphs'  # kdd
     # [post_mode, comment_mode, reply_mode]
     # items = ['all', 'seg', 'snt']
     # modes = list(map(lambda x: list(x), list(product(items, items, items))))
@@ -33,7 +35,6 @@ if __name__ == "__main__":
 
     satisfactions = []
 
-    '''
     for s in satisfactions_float:
         if s < 3.5:
             satisfactions.append(0)
@@ -41,8 +42,8 @@ if __name__ == "__main__":
             satisfactions.append(1)
         else:
             satisfactions.append(2)
-    '''
 
+    '''
     for s in satisfactions_float:
         if s < 3.2:
             satisfactions.append(0)
@@ -54,6 +55,7 @@ if __name__ == "__main__":
             satisfactions.append(3)
         else:
             satisfactions.append(4)
+    '''
 
     print(Counter(satisfactions))
 
@@ -113,7 +115,7 @@ if __name__ == "__main__":
 
         count_min_label = min(train_df['label'].value_counts())
 
-        labels = [0, 1, 2, 3, 4]
+        labels = [0, 1, 2]
 
         train_sample_df = pd.DataFrame([], columns=columns)
 
@@ -141,7 +143,9 @@ if __name__ == "__main__":
         device = torch.device('cuda')
 
         model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
-                                            device=device, target="post_comment")
+                                            device=device, target="post_comment", output_attentions=True)
+        # model = SplitBertTransformerModel(num_labels=len(labels), embedding_size=384, max_sentences=10, max_len1=10,
+        #                                   max_len2=4, device=device)
 
         model.to(device)
 
