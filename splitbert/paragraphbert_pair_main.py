@@ -142,17 +142,17 @@ if __name__ == "__main__":
 
         device = torch.device('cuda')
 
-        model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
-                                            device=device, target="post_comment", output_attentions=True)
-        # model = SplitBertTransformerModel(num_labels=len(labels), embedding_size=384, max_sentences=10, max_len1=10,
-        #                                   max_len2=4, device=device)
+        # model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
+        #                                     device=device, target="post_comment", output_attentions=True)
+        model = SplitBertTransformerModel(num_labels=len(labels), embedding_size=384, max_sentences=10, max_len1=10,
+                                          max_len2=4, device=device)
 
         model.to(device)
 
         for param in model.sbert.parameters():
             param.requires_grad = False
 
-        for param in model.bert.parameters():
-            param.requires_grad = False
+        # for param in model.bert.parameters():
+        #     param.requires_grad = False
 
         train(model, device, dataset_train, dataset_val, labels, 'post_comment', path, mode)

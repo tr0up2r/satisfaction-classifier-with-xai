@@ -4,6 +4,7 @@ import random
 import csv
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import os
 import copy
 
@@ -113,6 +114,10 @@ def make_masks(max_sentences, count, device):
     return mask, key_padding_mask
 
 
+def NormalizeTensor(data):
+    return (data - torch.min(data)) / (torch.max(data) - torch.min(data))
+
+
 class SplitBertTransformerModel(nn.Module):
 
     def __init__(self, num_labels, embedding_size, max_sentences, max_len1, max_len2, device):
@@ -154,9 +159,9 @@ class SplitBertTransformerModel(nn.Module):
         current_batch_size = len(input_ids1)
 
         batch_encoder_embeddings = torch.empty(size=(current_batch_size, 1, self.max_sentences, self.embedding_size),
-                                               requires_grad=True).to('cuda')
+                                               requires_grad=True).to(self.device)
         batch_decoder_embeddings = torch.empty(size=(current_batch_size, 1, self.max_sentences, self.embedding_size),
-                                               requires_grad=True).to('cuda')
+                                               requires_grad=True).to(self.device)
 
         batch_encoder_embeddings = get_batch_embeddings(self.sbert, self.fc_layer, None, self.embedding_size, input_ids1,
                                                         attention_mask1, sentence_count1, self.max_sentences,
@@ -165,8 +170,8 @@ class SplitBertTransformerModel(nn.Module):
                                                         attention_mask2, sentence_count2, self.max_sentences,
                                                         batch_decoder_embeddings, False, self.device)
 
-        outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to('cuda')
-        attentions = torch.empty(size=(current_batch_size, self.max_sentences, self.max_sentences), requires_grad=True).to('cuda')
+        outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to(self.device)
+        attentions = {'encoder_attentions': [], 'decoder_attentions': [], 'cross_attentions': []}
 
         for encoder_embeddings, decoder_embeddings, count1, count2, i in zip(batch_encoder_embeddings,
                                                                              batch_decoder_embeddings,
@@ -187,11 +192,32 @@ class SplitBertTransformerModel(nn.Module):
                                           mask=src_mask,
                                           src_key_padding_mask=src_key_padding_mask)
 
+            # shape: (len, 1, 384)
+            now_attention = torch.empty(size=(count1, 1, self.embedding_size), requires_grad=True).to(self.device)
+            encoder_attentions = encoder_output[:count1]
+
+            for now in range(len(encoder_attentions)):
+                now_attention[now] = NormalizeTensor(encoder_attentions[now])
+
+            attention = self.encoder_layer.self_attn(encoder_attentions, encoder_attentions, encoder_attentions)
+            attentions['encoder_attentions'].append(attention[1].unsqueeze(0))
+
             decoder_output = self.decoder(tgt=decoder_embeddings, memory=encoder_output,
                                           tgt_mask=tgt_mask,
                                           tgt_key_padding_mask=tgt_key_padding_mask)
 
-            # attention = self.decoder_layer.multihead_attn(decoder_embeddings, encoder_embeddings, encoder_embeddings)[1]
+            now_attention = torch.empty(size=(count2, 1, self.embedding_size), requires_grad=True).to(self.device)
+            decoder_attentions = decoder_output[:count2]
+            for now in range(len(decoder_attentions)):
+                now_attention[now] = NormalizeTensor(decoder_attentions[now])
+
+            attention = self.decoder_layer.self_attn(decoder_attentions, decoder_attentions, decoder_attentions)
+            attentions['decoder_attentions'].append(attention[1].unsqueeze(0))
+
+            decoder_embedding_attention = decoder_embeddings[:count2]
+            attention = self.decoder_layer.multihead_attn(decoder_embedding_attention, encoder_attentions,
+                                                          encoder_attentions)
+            attentions['cross_attentions'].append(attention[1].unsqueeze(0))
 
             attn_mask = copy.deepcopy(src_key_padding_mask.to(self.device))
 
@@ -201,20 +227,14 @@ class SplitBertTransformerModel(nn.Module):
                 else:
                     attn_mask = torch.cat([attn_mask, torch.tensor([True]*self.max_sentences).unsqueeze(0).to(self.device)], dim=0)
 
-            attention = self.multihead_attn(decoder_embeddings, encoder_embeddings,encoder_embeddings,
-                                             attn_mask=attn_mask)[1]
-
             decoder_output = torch.mean(decoder_output[:count2], dim=0).squeeze(0)
-
-
             outputs[i] = decoder_output
-            attentions[i] = attention.unsqueeze(0)
 
         outputs = self.classifier1(outputs)
         logits = self.classifier2(outputs)
         loss_fct = nn.CrossEntropyLoss()
-        # loss = loss_fct(logits.squeeze(), labels.squeeze())
-        loss = loss_fct(logits, labels)
+        loss = loss_fct(logits.squeeze(), labels.squeeze())
+        # loss = loss_fct(logits, labels)
 
         return (loss, logits, outputs, attentions)
 
@@ -402,6 +422,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                     # print(encoder_output)
                     attention = self.encoder_layer.self_attn(embeddings, embeddings, embeddings, attn_mask=src_mask,
                                                              key_padding_mask=src_key_padding_mask)[1]
+
 
                     encoder_outputs_list.append(encoder_output.swapaxes(0, 1))
 
