@@ -568,6 +568,15 @@ class SplitBertConcatEncoderModel(nn.Module):
                                                              self.max_post_len, self.max_comment_len, self.concat_mode)
 
                 encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+
+                now_attention = torch.empty(size=(p_count+c_count, 1, self.embedding_size), requires_grad=True).to(self.device)
+                for now in range(len(now_attention)):
+                    now_attention[now] = normalize_tensor(encoder_output[now])
+
+                attention = self.encoder_layer.self_attn(now_attention, now_attention, now_attention)[1]
+                # attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
+                #                                          attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[1]
+                attentions[i].append(attention)
                 encoder_outputs_list.append(encoder_output.swapaxes(0, 1))
 
                 encoder_output = torch.mean(encoder_output[:(p_count+c_count)], dim=0).squeeze(0)
