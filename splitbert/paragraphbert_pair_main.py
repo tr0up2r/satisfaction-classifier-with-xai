@@ -144,8 +144,8 @@ if __name__ == "__main__":
 
         model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
                                             max_post_len=max_post, max_comment_len=max_comment,
-                                            device=device, target="post_comment", concat_mode="concat_all",
-                                            output_attentions=True)
+                                            device=device, target="post_comment", concat_mode="sep",
+                                            attention_mode=False, output_attentions=True)
         # model = SplitBertTransformerModel(num_labels=len(labels), embedding_size=384, max_sentences=10, max_len1=10,
         #                                   max_len2=4, device=device)
 

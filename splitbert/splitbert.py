@@ -338,7 +338,7 @@ class SplitBertEncoderModel(nn.Module):
 
 class SplitBertConcatEncoderModel(nn.Module):
     def __init__(self, num_labels, embedding_size, max_len, max_post_len, max_comment_len, device, target, concat_mode,
-                 output_attentions=False):
+                 attention_mode=False, output_attentions=False):
         super().__init__()
         self.num_labels = num_labels
         self.embedding_size = embedding_size
@@ -348,6 +348,7 @@ class SplitBertConcatEncoderModel(nn.Module):
         self.target = target
         self.device = device
         self.concat_mode = concat_mode
+        self.attention_mode=attention_mode
         self.output_attentions = output_attentions
 
         self.bert = BertModel.from_pretrained('bert-base-uncased')
@@ -357,12 +358,14 @@ class SplitBertConcatEncoderModel(nn.Module):
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.embedding_size, nhead=8)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
         self.pe = PositionalEncoding(self.embedding_size, max_len=self.max_len)
+        self.layer_norm = nn.LayerNorm(self.embedding_size)
 
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(0.1)
         self.relu = nn.ReLU()
 
         self.classifier1 = nn.Linear(self.embedding_size * (2 if target == 'post_comment' else 3), self.embedding_size)
         self.classifier2 = nn.Linear(self.embedding_size, self.num_labels)
+        # self.attention_fc_layer = nn.Linear(self)
         # self.classifier3 = nn.Linear(self.embedding_size, self.num_labels)
         # self.post_init()
 
@@ -399,7 +402,7 @@ class SplitBertConcatEncoderModel(nn.Module):
         batch_embeddings_list = []
         encoder_outputs_list = []
         attention_list = []
-        attentions = [[] for _ in range(current_batch_size)]
+        attentions = []
 
         now = 0
 
@@ -447,31 +450,52 @@ class SplitBertConcatEncoderModel(nn.Module):
                         src_mask, src_key_padding_mask = make_masks(self.max_len, count, self.device)
 
                         encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
-                        attention_output = self.encoder(embeddings[:count])
-                        attentions[i].append(attention_output)
+                        # attention_output = self.encoder(embeddings[:count])
 
-                        attention = self.encoder_layer.self_attn(embeddings, embeddings, embeddings, attn_mask=src_mask,
-                                                                 key_padding_mask=src_key_padding_mask)[1]
+                        if len(encoder_outputs_list) == current_batch_size:
+                            encoder_outputs_list[i] = torch.cat([encoder_outputs_list[i], encoder_output[:count]],
+                                                                dim=0)
+                        else:
+                            encoder_outputs_list.append(encoder_output[:count])
 
-                        encoder_outputs_list.append(encoder_output.swapaxes(0, 1))
+            for i in range(current_batch_size):
+                # attentions = self.encoder_layer.self_attn(encoder_outputs_list[i], encoder_outputs_list[i],
+                #                                           encoder_outputs_list[i], attn_mask=src_mask,
+                #                                           key_padding_mask=src_key_padding_mask)
+                attentions = self.encoder_layer.self_attn(encoder_outputs_list[i], encoder_outputs_list[i],
+                                                          encoder_outputs_list[i])
 
-                        # mean
-                        encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
+                attention = attentions[0]
 
-                        # last output
-                        # encoder_output = encoder_output[count-1].squeeze(0)
-
-                    encoder_outputs[i] = encoder_output
-                if now == 0:
-                    result_outputs = encoder_outputs
+                # mean
+                if self.attention_mode:
+                    if self.attention_mode == 'attention_residual':
+                        # add & norm
+                        residual = encoder_outputs_list[i]
+                        attention = self.dropout(attention) + residual
+                        attention = self.layer_norm(attention)
+                    encoder_output = torch.mean(attention, dim=0).squeeze(0)
                 else:
-                    result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
+                    encoder_output = torch.mean(encoder_outputs_list[i], dim=0).squeeze(0)
 
-                now += 1
 
+                # last output
+                # encoder_output = encoder_output[count-1].squeeze(0)
+
+                encoder_outputs[i] = encoder_output
+                #     if now == 0:
+                #         result_outputs = encoder_outputs
+                #     else:
+                #         result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
+                #
+                #     now += 1
+
+            '''
             for i in range(len(attentions)):
                 attentions[i] = torch.cat(attentions[i], dim=0)
                 attentions[i] = self.encoder_layer.self_attn(attentions[i], attentions[i], attentions[i])[1]
+            '''
+
 
         elif self.concat_mode == 'concat_seq':
             for input_ids, attention_mask, sentence_count, now_mode, now_max_len in zip(input_ids_list,
@@ -583,13 +607,14 @@ class SplitBertConcatEncoderModel(nn.Module):
                 encoder_outputs[i] = encoder_output
                 i += 1
 
-        if self.target != 'reply' and self.concat_mode == 'sep':
-            result_outputs = self.classifier1(result_outputs)
+        # if self.target != 'reply' and self.concat_mode == 'sep':
+        #     result_outputs = self.classifier1(result_outputs)
 
-        if self.concat_mode == 'sep':
-            logits = self.classifier2(result_outputs)
-        else:
-            logits = self.classifier2(encoder_outputs)
+        # if self.concat_mode == 'sep':
+        #     logits = self.classifier2(result_outputs)
+        # else:
+        #     logits = self.classifier2(encoder_outputs)
+        logits = self.classifier2(encoder_outputs)
 
         loss_fct = nn.CrossEntropyLoss()
 
