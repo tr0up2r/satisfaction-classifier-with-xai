@@ -365,6 +365,10 @@ class SplitBertConcatEncoderModel(nn.Module):
 
         self.classifier1 = nn.Linear(self.embedding_size * (2 if target == 'post_comment' else 3), self.embedding_size)
         self.classifier2 = nn.Linear(self.embedding_size, self.num_labels)
+        self.attn_classifier1 = nn.Linear(self.embedding_size * (self.max_post_len + self.max_comment_len),
+                                          (self.embedding_size * (self.max_post_len + self.max_comment_len)) // 2)
+        self.attn_classifier2 = nn.Linear((self.embedding_size * (self.max_post_len + self.max_comment_len)) // 2,
+                                          self.embedding_size)
         # self.attention_fc_layer = nn.Linear(self)
         # self.classifier3 = nn.Linear(self.embedding_size, self.num_labels)
         # self.post_init()
@@ -593,18 +597,42 @@ class SplitBertConcatEncoderModel(nn.Module):
 
                 encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
 
-                now_attention = torch.empty(size=(p_count+c_count, 1, self.embedding_size), requires_grad=True).to(self.device)
+                now_attention = torch.empty(size=(p_count + c_count, 1, self.embedding_size), requires_grad=True).to(
+                    self.device)
                 for now in range(len(now_attention)):
                     now_attention[now] = normalize_tensor(encoder_output[now])
 
                 attention = self.encoder_layer.self_attn(now_attention, now_attention, now_attention)[1]
                 # attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
                 #                                          attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[1]
-                attentions[i].append(attention)
-                encoder_outputs_list.append(encoder_output.swapaxes(0, 1))
+                attentions.append(attention)
+                encoder_outputs_list.append(encoder_output)
 
-                encoder_output = torch.mean(encoder_output[:(p_count+c_count)], dim=0).squeeze(0)
-                encoder_outputs[i] = encoder_output
+                if self.attention_mode:
+                    attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
+                                                             attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+
+                    if self.attention_mode == 'attention_residual':
+                        # add & norm
+                        residual = encoder_outputs_list[i]
+                        attention = self.dropout(attention) + residual
+                        attention = self.layer_norm(attention)
+
+                    # mul mask
+                    attention = attention.swapaxes(0, 2)
+                    mask = torch.tensor([1] * (p_count + c_count) +
+                                        [0] * (self.max_post_len + self.max_comment_len - (p_count + c_count))).to(
+                        self.device)
+                    attention = attention.mul(mask).swapaxes(0, 2)
+
+                    attention = torch.flatten(attention)
+                    attention = self.attn_classifier1(attention)
+                    attention = self.attn_classifier2(attention)
+                    encoder_outputs[i] = attention
+                else:
+                    encoder_output = torch.mean(encoder_output[:(p_count + c_count)], dim=0).squeeze(0)
+                    encoder_outputs[i] = encoder_output
+
                 i += 1
 
         # if self.target != 'reply' and self.concat_mode == 'sep':
