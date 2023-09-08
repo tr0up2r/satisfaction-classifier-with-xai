@@ -1,16 +1,20 @@
+from itertools import product
 import pandas as pd
 from spacy.lang.en import English
+from collections import Counter
 from transformers import BertTokenizer
 import torch
 
 from splitbert import train_test_split
 from splitbert import conduct_input_ids_and_attention_masks
 from splitbert import SplitBertConcatEncoderModel
+from splitbert import SplitBertEncoderModel
 from splitbert import train
 from textsplit import text_segmentation
 
 if __name__ == "__main__":
-    path = '/home/mykim/source/predicting-satisfaction-using-graphs'
+    # path = '/home/mykim/source/predicting-satisfaction-using-graphs'  # intelligence
+    path = '/home/mykim/data1/predicting-satisfaction-using-graphs'  # kdd
     # [post_mode, comment_mode, reply_mode]
     # items = ['all', 'seg', 'snt']
     # modes = list(map(lambda x: list(x), list(product(items, items, items))))
@@ -82,11 +86,11 @@ if __name__ == "__main__":
 
         # data split (train & test sets)
         idx_train, idx_remain = train_test_split(df.index.values, test_size=0.20, random_state=42)
-        # idx_val, idx_test = train_test_split(idx_remain, test_size=0.50, random_state=42)
+        idx_val, idx_test = train_test_split(idx_remain, test_size=0.50, random_state=42)
 
         train_sample_df = df.iloc[idx_train]
-        val_df = df.iloc[idx_remain]
-        # test_df = df.iloc[idx_test]
+        val_df = df.iloc[idx_val]
+        test_df = df.iloc[idx_test]
 
         # print(train_df['label'].value_counts())
         # count_min_label = min(train_df['label'].value_counts())
@@ -123,7 +127,9 @@ if __name__ == "__main__":
         device = torch.device('cuda')
 
         model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
-                                            device=device, target="post_comment")
+                                            max_post_len=max_post, max_comment_len=max_comment,
+                                            device=device, target="post_comment", concat_mode="concat_all",
+                                            attention_mode="attention", output_attentions=True)
 
         model.to(device)
 
