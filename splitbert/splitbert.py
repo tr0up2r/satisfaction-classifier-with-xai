@@ -86,10 +86,12 @@ def get_batch_embeddings(model, fc_layer, fc_layer_for_pc, embedding_size, input
         else:
             model_output = mean_pooling(model_output, attention_mask[i][0:sentence_count[i]])
 
-        for j in range(sentence_count[i].item()):
+        count = min(sentence_count[i].item(), max_sentences)
+
+        for j in range(count):
             bert_outputs[j] = model_output[j]
 
-        for j in range(sentence_count[i].item(), max_sentences):
+        for j in range(count, max_sentences):
             bert_outputs[j] = torch.zeros(1, embedding_size).to(device)
 
         # nn.Linear
@@ -369,6 +371,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                                           (self.embedding_size * (self.max_post_len + self.max_comment_len)) // 2)
         self.attn_classifier2 = nn.Linear((self.embedding_size * (self.max_post_len + self.max_comment_len)) // 2,
                                           self.embedding_size)
+        self.mean_attn_layer = nn.Linear(self.embedding_size * 2, self.embedding_size)
         # self.attention_fc_layer = nn.Linear(self)
         # self.classifier3 = nn.Linear(self.embedding_size, self.num_labels)
         # self.post_init()
@@ -404,13 +407,178 @@ class SplitBertConcatEncoderModel(nn.Module):
         current_batch_size = len(input_ids1)
 
         batch_embeddings_list = []
-        encoder_outputs_list = []
+        outputs_list = []
         attention_list = []
-        attentions = []
-
+        attentions = [[] for _ in range(current_batch_size)]
         now = 0
 
-        if self.concat_mode == 'sep':
+        if self.concat_mode == 'sep_attention':
+            for input_ids, attention_mask, sentence_count, now_mode in zip(input_ids_list, attention_mask_list,
+                                                                           sentence_count_list, mode):
+                if now_mode == 'all':
+                    model = self.bert
+                    is_all = True
+                    max_sentence = 1
+                else:
+                    model = self.sbert
+                    is_all = False
+                    max_sentence = self.max_len
+
+                batch_embeddings = torch.empty(size=(current_batch_size, 1, max_sentence, self.embedding_size),
+                                               requires_grad=True).to(self.device)
+
+                if self.output_attentions:
+                    batch_embeddings, attention = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
+                                                                       self.embedding_size, input_ids, attention_mask,
+                                                                       sentence_count, self.max_len, batch_embeddings,
+                                                                       is_all, self.device, True)
+                else:
+                    batch_embeddings = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
+                                                            self.embedding_size, input_ids, attention_mask,
+                                                            sentence_count, self.max_len, batch_embeddings, is_all,
+                                                            self.device)
+                
+                batch_embeddings_list.append(batch_embeddings)
+
+                encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to(
+                    self.device)
+                attention_outputs = torch.empty(size=(current_batch_size, self.max_len + 4, self.embedding_size),
+                                                requires_grad=True).to(self.device)
+
+                # print(attentions)
+
+                for embeddings, count, i in zip(batch_embeddings, sentence_count, range(current_batch_size)):
+                    embeddings = embeddings.swapaxes(0, 1)
+
+                    if is_all:  # no zero padding -> no src mask
+                        encoder_output = self.encoder(embeddings)
+                    else:
+                        # add positional encoding
+                        embeddings = self.pe(embeddings)
+
+                        # make masks
+                        src_mask, src_key_padding_mask = make_masks(self.max_len, count, self.device)
+
+                        encoder_output = self.encoder(embeddings, mask=src_mask,
+                                                      src_key_padding_mask=src_key_padding_mask)
+                        attention_output = self.encoder(embeddings[:count])
+                        attentions[i].append(attention_output)
+                        # print(encoder_output)
+                        attention = self.encoder_layer.self_attn(embeddings, embeddings, embeddings, attn_mask=src_mask,
+                                                                 key_padding_mask=src_key_padding_mask)[1]
+
+                        outputs_list.append(encoder_output.swapaxes(0, 1))
+
+                        # mean
+                        encoder_output = torch.mean(encoder_output[:count], dim=0).squeeze(0)
+
+                        # last output
+                        # encoder_output = encoder_output[count-1].squeeze(0)
+
+                    encoder_outputs[i] = encoder_output
+                if now == 0:
+                    result_outputs = encoder_outputs
+                else:
+                    result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
+                now += 1
+
+            encoder_outputs = self.classifier1(result_outputs)
+            encoder_outputs = torch.cat([encoder_outputs, torch.zeros(current_batch_size, 384, device=self.device)], dim=1)
+
+            # mean + flatten attentioned tensor
+            batch_embeddings_list = []
+            outputs_list = []
+            attentions = []
+            for input_ids, attention_mask, sentence_count, now_mode, now_max_len in zip(input_ids_list,
+                                                                                        attention_mask_list,
+                                                                                        sentence_count_list, mode,
+                                                                                        (self.max_post_len,
+                                                                                         self.max_comment_len)):
+
+                batch_embeddings = torch.empty(size=(current_batch_size, 1, now_max_len, self.embedding_size),
+                                               requires_grad=True).to(self.device)
+
+                if now_mode == 'all':
+                    model = self.bert
+                    is_all = True
+                else:
+                    model = self.sbert
+                    is_all = False
+
+                if self.output_attentions:
+                    batch_embeddings, attention = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
+                                                                       self.embedding_size, input_ids, attention_mask,
+                                                                       sentence_count, now_max_len, batch_embeddings,
+                                                                       is_all, self.device, True)
+                else:
+                    batch_embeddings = get_batch_embeddings(model, self.fc_layer, self.fc_layer_for_pc,
+                                                            self.embedding_size, input_ids, attention_mask,
+                                                            sentence_count, now_max_len, batch_embeddings, is_all,
+                                                            self.device)
+                batch_embeddings_list.append(batch_embeddings)
+
+            batch_embeddings = torch.cat([batch_embeddings_list[0], batch_embeddings_list[1]], dim=2)
+
+            for i in range(len(batch_embeddings)):
+                non_zero_rows = batch_embeddings[i][0][batch_embeddings[i][0].sum(dim=1) != 0]
+                zero_rows = torch.zeros((batch_embeddings[i][0].shape[0] - non_zero_rows.shape[0], self.embedding_size),
+                                        dtype=torch.int, device=self.device)
+                batch_embeddings[i] = torch.cat([non_zero_rows, zero_rows])
+
+            # encoder_outputs = torch.empty(size=(current_batch_size, self.embedding_size), requires_grad=True).to(
+            #     self.device)
+
+            i = 0
+            for embeddings, p_count, c_count in zip(batch_embeddings, sentence_count_list[0], sentence_count_list[1]):
+                embeddings = embeddings.swapaxes(0, 1)
+                # return embedding
+                outputs_list.append(embeddings)
+
+                src_mask, src_key_padding_mask = make_masks(self.max_post_len, [p_count, c_count], self.device,
+                                                            self.max_post_len, self.max_comment_len, "concat_all")
+
+                encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
+
+                now_attention = torch.empty(size=(p_count + c_count, 1, self.embedding_size), requires_grad=True).to(
+                    self.device)
+                for now in range(len(now_attention)):
+                    now_attention[now] = normalize_tensor(encoder_output[now])
+
+                attention = self.encoder_layer.self_attn(now_attention, now_attention, now_attention)[1]
+                # attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
+                #                                          attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[1]
+                # attentions.append(attention)
+                # outputs_list.append(encoder_output)
+
+                attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
+                                                         attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+
+                if self.attention_mode == 'attention_residual':
+                    # add & norm
+                    residual = outputs_list[i]
+                    attention = self.dropout(attention) + residual
+                    attention = self.layer_norm(attention)
+
+                # mul mask - diagonal masking
+                attention = attention.swapaxes(0, 2)
+                mask = torch.tensor([1] * (p_count + c_count) +
+                                    [0] * (self.max_post_len + self.max_comment_len - (p_count + c_count))).to(
+                    self.device)
+                attention = attention.mul(mask).swapaxes(0, 2)
+
+                # return attentioned tensor
+                # outputs_list.append(attention)
+
+                attention = torch.flatten(attention)
+                attention = self.attn_classifier1(attention)
+                attention = self.attn_classifier2(attention)
+                encoder_outputs[i][self.embedding_size:] = attention
+                i += 1
+            # encoder_outputs = self.classifier1(encoder_outputs)
+            encoder_outputs = self.mean_attn_layer(encoder_outputs)
+
+
+        elif self.concat_mode == 'sep':
             for input_ids, attention_mask, sentence_count, now_mode in zip(input_ids_list, attention_mask_list,
                                                                            sentence_count_list, mode):
                 if now_mode == 'all':
@@ -456,18 +624,17 @@ class SplitBertConcatEncoderModel(nn.Module):
                         encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
                         # attention_output = self.encoder(embeddings[:count])
 
-                        if len(encoder_outputs_list) == current_batch_size:
-                            encoder_outputs_list[i] = torch.cat([encoder_outputs_list[i], encoder_output[:count]],
-                                                                dim=0)
+                        if len(outputs_list) == current_batch_size:
+                            outputs_list[i] = torch.cat([outputs_list[i], encoder_output[:count]], dim=0)
                         else:
-                            encoder_outputs_list.append(encoder_output[:count])
+                            outputs_list.append(encoder_output[:count])
 
             for i in range(current_batch_size):
-                # attentions = self.encoder_layer.self_attn(encoder_outputs_list[i], encoder_outputs_list[i],
-                #                                           encoder_outputs_list[i], attn_mask=src_mask,
+                # attentions = self.encoder_layer.self_attn(outputs_list[i], outputs_list[i],
+                #                                           outputs_list[i], attn_mask=src_mask,
                 #                                           key_padding_mask=src_key_padding_mask)
-                attentions = self.encoder_layer.self_attn(encoder_outputs_list[i], encoder_outputs_list[i],
-                                                          encoder_outputs_list[i])
+                attentions = self.encoder_layer.self_attn(outputs_list[i], outputs_list[i],
+                                                          outputs_list[i])
 
                 attention = attentions[0]
 
@@ -475,12 +642,12 @@ class SplitBertConcatEncoderModel(nn.Module):
                 if self.attention_mode:
                     if self.attention_mode == 'attention_residual':
                         # add & norm
-                        residual = encoder_outputs_list[i]
+                        residual = outputs_list[i]
                         attention = self.dropout(attention) + residual
                         attention = self.layer_norm(attention)
                     encoder_output = torch.mean(attention, dim=0).squeeze(0)
                 else:
-                    encoder_output = torch.mean(encoder_outputs_list[i], dim=0).squeeze(0)
+                    encoder_output = torch.mean(outputs_list[i], dim=0).squeeze(0)
 
 
                 # last output
@@ -493,6 +660,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                 #         result_outputs = torch.cat([result_outputs, encoder_outputs], dim=1)
                 #
                 #     now += 1
+
 
             '''
             for i in range(len(attentions)):
@@ -542,7 +710,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                                                              self.max_post_len, self.max_comment_len, self.concat_mode)
 
                 encoder_output = self.encoder(embeddings, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
-                encoder_outputs_list.append(encoder_output.swapaxes(0, 1))
+                outputs_list.append(encoder_output.swapaxes(0, 1))
 
                 indices_to_mean = list(range(p_count)) + list(range(self.max_post_len, self.max_post_len + c_count))
                 encoder_output = torch.mean(encoder_output[indices_to_mean], dim=0).squeeze(0)
@@ -593,6 +761,9 @@ class SplitBertConcatEncoderModel(nn.Module):
                 i = 0
                 for embeddings, p_count, c_count in zip(batch_embeddings, sentence_count_list[0], sentence_count_list[1]):
                     embeddings = embeddings.swapaxes(0, 1)
+                    # return embedding
+                    outputs_list.append(embeddings)
+                    
 
                     src_mask, src_key_padding_mask = make_masks(self.max_post_len, [p_count, c_count], self.device,
                                                                  self.max_post_len, self.max_comment_len, self.concat_mode)
@@ -608,7 +779,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                     # attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
                     #                                          attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[1]
                     attentions.append(attention)
-                    # encoder_outputs_list.append(encoder_output)
+                    # outputs_list.append(encoder_output)
 
                     if self.attention_mode:
                         attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
@@ -616,7 +787,7 @@ class SplitBertConcatEncoderModel(nn.Module):
 
                         if self.attention_mode == 'attention_residual':
                             # add & norm
-                            residual = encoder_outputs_list[i]
+                            residual = outputs_list[i]
                             attention = self.dropout(attention) + residual
                             attention = self.layer_norm(attention)
 
@@ -626,7 +797,9 @@ class SplitBertConcatEncoderModel(nn.Module):
                                             [0] * (self.max_post_len + self.max_comment_len - (p_count + c_count))).to(
                             self.device)
                         attention = attention.mul(mask).swapaxes(0, 2)
-                        encoder_outputs_list.append(attention)
+
+                        # return attentioned tensor
+                        # outputs_list.append(attention)
 
                         attention = torch.flatten(attention)
                         attention = self.attn_classifier1(attention)
@@ -657,6 +830,7 @@ class SplitBertConcatEncoderModel(nn.Module):
 
                 i = 0
                 for embeddings, c_count in zip(batch_embeddings, sentence_count_list[0]):
+                    c_count = min(c_count, torch.tensor(self.max_comment_len))
                     embeddings = embeddings.swapaxes(0, 1)
                     src_mask, src_key_padding_mask = make_masks(self.max_comment_len, [torch.tensor(0), c_count], self.device,
                                                                 0, self.max_comment_len, self.concat_mode)
@@ -671,7 +845,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                     # attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
                     #                                          attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[1]
                     attentions.append(attention)
-                    # encoder_outputs_list.append(encoder_output)
+                    # outputs_list.append(encoder_output)
 
                     if self.attention_mode:
                         attention = self.encoder_layer.self_attn(encoder_output, encoder_output, encoder_output,
@@ -679,7 +853,7 @@ class SplitBertConcatEncoderModel(nn.Module):
 
                         if self.attention_mode == 'attention_residual':
                             # add & norm
-                            residual = encoder_outputs_list[i]
+                            residual = outputs_list[i]
                             attention = self.dropout(attention) + residual
                             attention = self.layer_norm(attention)
 
@@ -688,7 +862,7 @@ class SplitBertConcatEncoderModel(nn.Module):
                         mask = torch.tensor([1] * c_count +
                                             [0] * (self.max_post_len + self.max_comment_len - c_count)).to(self.device)
                         attention = attention.mul(mask).swapaxes(0, 2)
-                        encoder_outputs_list.append(attention)
+                        outputs_list.append(attention)
 
                         attention = torch.flatten(attention)
                         attention = self.attn_classifier1(attention)
@@ -718,14 +892,14 @@ class SplitBertConcatEncoderModel(nn.Module):
             return modeling_outputs.SequenceClassifierOutput(
                 loss=loss,
                 logits=logits,
-                hidden_states=encoder_outputs_list,
+                hidden_states=outputs_list,
                 attentions=attentions
             )
 
         return modeling_outputs.SequenceClassifierOutput(
             loss=loss,
             logits=logits,
-            hidden_states=encoder_outputs_list
+            hidden_states=outputs_list
         )
 
 
