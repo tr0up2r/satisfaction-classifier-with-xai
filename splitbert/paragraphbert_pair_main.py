@@ -1,18 +1,19 @@
-from itertools import product
 import pandas as pd
 from spacy.lang.en import English
-from collections import Counter
 from transformers import BertTokenizer
 import torch
 
 from splitbert import train_test_split
-from splitbert import conduct_input_ids_and_attention_masks
-from splitbert import SplitBertConcatEncoderModel
-from splitbert import SplitBertEncoderModel
-from splitbert import SplitBertTransformerModel
-from splitbert import train
+# from splitbert import conduct_input_ids_and_attention_masks
+# from splitbert import SplitBertConcatEncoderModel
+from SplitBertEncoderModel import SplitBertEncoderModel
+from SplitBertEncoderAttentionModel import SplitBertEncoderAttentionModel
+from utils import conduct_input_ids_and_attention_masks
+from train import train
+# from splitbert import train
 from textsplit import text_segmentation
 from collections import Counter
+
 
 if __name__ == "__main__":
     # path = '/home/mykim/source/predicting-satisfaction-using-graphs'  # intelligence
@@ -142,13 +143,13 @@ if __name__ == "__main__":
 
         device = torch.device('cuda')
 
-        model = SplitBertConcatEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
-                                            max_post_len=max_post, max_comment_len=max_comment,
-                                            device=device, target="post_comment", concat_mode="sep_attention",
-                                            attention_mode=False, output_attentions=True, softmax=True)
-        # model = SplitBertTransformerModel(num_labels=len(labels), embedding_size=384, max_sentences=10, max_len1=10,
-        #                                   max_len2=4, device=device)
-
+        # model = SplitBertEncoderModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
+        #                               max_post_len=max_post, max_comment_len=max_comment, device=device,
+        #                               target="post_comment", mask_mode='diagonal',softmax=True)
+        model = SplitBertEncoderAttentionModel(num_labels=len(labels), embedding_size=384, max_len=max_count,
+                                               max_post_len=max_post, max_comment_len=max_comment, device=device,
+                                               target="post_comment", encoder_mask_mode=False,
+                                               attention_mask_mode='diagonal', softmax=True)
         model.to(device)
 
         for param in model.sbert.parameters():
