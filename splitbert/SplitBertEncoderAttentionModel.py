@@ -5,9 +5,9 @@ from transformers import BertModel
 from transformers import modeling_outputs
 from typing import Optional, Tuple, Union
 from transformers import AutoTokenizer, AutoModel
-from utils import PositionalEncoding
-from utils import get_batch_embeddings
-from utils import make_masks
+from splitbert.utils import PositionalEncoding
+from splitbert.utils import get_batch_embeddings
+from splitbert.utils import make_masks
 
 
 class SplitBertEncoderAttentionModel(nn.Module):
