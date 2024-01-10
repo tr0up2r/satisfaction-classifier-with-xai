@@ -17,7 +17,7 @@ from collections import Counter
 
 if __name__ == "__main__":
     # path = '/home/mykim/source/predicting-satisfaction-using-graphs'  # intelligence
-    path = '/home/mykim/data1/predicting-satisfaction-using-graphs'  # kdd
+    path = '/home/mykim/data1/satisfaction-classifier-with-xai'  # kdd
     # [post_mode, comment_mode, reply_mode]
     # items = ['all', 'seg', 'snt']
     # modes = list(map(lambda x: list(x), list(product(items, items, items))))
